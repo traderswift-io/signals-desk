@@ -32,6 +32,12 @@ SIGNALS_PROMPTS = {
     'signals-reviewer': 'signals-review',
 }
 
+INTAKE_ALLOWED_CALLS = {
+    'GET /v1/signals',
+    'GET <hub-read-endpoint>',
+    'POST /v1/deliveries {signal_id, event_id}',
+}
+
 
 def check_prompt_front_matter():
     root = Path(__file__).parent.parent
@@ -81,13 +87,18 @@ def check_intake():
         assert 'trusts the served publication' not in common and 'no hub verification' not in common
         operations = set(re.findall(r'^- `(GET [^`]+|POST [^`]+)`', skill, re.MULTILINE))
         allowed = set(re.findall(r'^- `(GET [^`]+|POST [^`]+)`', common, re.MULTILINE))
-        assert operations == allowed == {'GET /v1/signals', 'POST /v1/deliveries {signal_id, event_id}'}
-        assert 'trusts the served publication; it adds no hub verification' in skill
+        assert operations == allowed == INTAKE_ALLOWED_CALLS
+        if 'GET <hub-read-endpoint>' in INTAKE_ALLOWED_CALLS:
+            assert 'trusts the served publication' not in skill and 'no hub verification' not in skill
+        else:
+            assert 'trusts the served publication; it adds no hub verification' in skill
 
     check_pair(prompt, intake)
     broken_prompts = [prompt.replace(delegation, 'This desk trusts the served publication; no hub verification.'),
                       prompt.replace('- `GET /v1/signals`\n', ''),
                       prompt + '\n- `POST /v1/orders`\n']
+    if 'GET <hub-read-endpoint>' in INTAKE_ALLOWED_CALLS:
+        broken_prompts.append(prompt.replace('- `GET <hub-read-endpoint>`\n', ''))
     for broken in broken_prompts:
         try:
             check_pair(broken, intake)
