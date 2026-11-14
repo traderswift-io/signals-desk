@@ -1,0 +1,40 @@
+{
+  "coordinator_url": "<coordinator-base-url>",
+  "builder_dexs": ["xyz"],
+  "resident": true,
+  "stop_mode": "software",
+  "info_url": "<venue-info-url>",
+  "websocket_url": "<venue-websocket-url>",
+  "binance_ticker_url": "<public-ticker-url>",
+  "binance_symbols": {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"},
+  "access_client_id": "<service-token-id>",
+  "access_client_secret": "<service-token-secret>",
+  "key_ref": "<key-reference>",
+  "vault_address": "<vault-address>",
+  "account_address": "<same-vault-address>",
+  "delegate_key_file": "<signing-key-file>",
+  "delegate_public_key": "<delegate-public-hex>",
+  "record_path": "<ticket-record-file>",
+  "control_socket": "<local-control-socket>",
+  "risk_fraction": "<risk-fraction>",
+  "leverage_cap": "<maximum-leverage>",
+  "exit_band": "<fractional-price-band>",
+  "request_timeout_seconds": "<request-timeout-seconds>",
+  "policy": {
+    "epoch": "<policy-epoch-integer>",
+    "venues": ["hyperliquid"],
+    "vault_address": "<vault-address>",
+    "expires_at": "<unix-seconds-integer>",
+    "revoked": false,
+    "revoked_at": 0,
+    "chain_stale": false,
+    "asset_caps": [{"asset": "BTC", "max_order_size": "<size-cap>", "max_daily_size": "<daily-size-cap>"}]
+  },
+  "redis": {
+    "host": "<redis-endpoint>",
+    "port": "<redis-port-integer>",
+    "username": "<reader-acl-user>",
+    "password": "<reader-password>",
+    "stream": "<signal-stream>"
+  }
+}

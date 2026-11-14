@@ -1,193 +1,90 @@
-# Set up the HyperGrok trading desk
+# Set up the Signals Desk demo
 
-You are a Grok Bot building the user's Hyperliquid trading desk from this repository. Follow this file top to bottom. When you finish, the user has seven specialist Bots (six on a **Trading Floor** group chat, one reviewer by DM), seventeen shared skills, a prepared desk computer and a written desk record. Setup is read-only: no keys, no orders.
+This guide documents the **TraderSwift demo desk** in Grok: five bots in a private Trading Floor, five role skills, two service credentials and three routines scheduled in UTC. The Signals service is private; obtain a subscriber token from the signal publisher. Setup generates the Executor's delegate key and places no orders.
 
-In Grok Bot, if your runtime loaded this repository as a plugin, invoke `hypergrok-bootstrap`: it performs this runbook, rings a live zero-key Opening Bell first, and returns the same receipt. This file remains the complete manual path and source of truth.
+This guide is for the `signer` branch; `main` mirrors upstream unchanged. A `traderswift` branch is coming and is not yet published. Use a reviewed checkout of this fork and record its commit. The current release does not support resting stop orders for routine-driven bots, so their new entries remain disabled.
 
-## 1. Get the repository onto the desk computer
+## 1. Prepare the bot workspaces
 
-If `/workspace/hypergrok` already contains a Git checkout, preserve it. Its `plugin.json` must name version `1.7.2`, and `git rev-parse HEAD` must equal `git rev-parse 'refs/tags/v1.7.2^{commit}'`. If the tag is unavailable or either comparison fails, report the existing version and commit and stop dependent setup without overwriting, resetting or switching the checkout. An older release passing its own structural check is insufficient. For a matching existing checkout, run only the final `cd`, commit and structural-check line below; otherwise clone:
+Place the same reviewed Signals Desk checkout in each bot's persistent workspace. Record `<REVIEWED_COMMIT>` and `<BOT_WORKSPACE>`. Obtain `<SIGNALS_SERVICE_ENDPOINT>` and its subscriber token from the signal publisher, and `<DOOR_ENDPOINT>` and an access service token for the door from the Signer service operator. Use `<ACCOUNT_ADDRESS>` for the dedicated follower account authorized by the delegate policy. Mm1 is the demo's test account.
 
-```bash
-mkdir -p /workspace && cd /workspace
-git clone --depth 1 --branch v1.7.2 https://github.com/galleonlabs/hypergrok-trading-desk.git hypergrok
-cd /workspace/hypergrok && git rev-parse HEAD && bash scripts/check.sh
-```
+Use Python 3.11 or newer on Linux with `aiohttp`, `PyNaCl` and `redis`, as described in [desk/README.md](desk/README.md). Confirm that all five prompts and five skills below exist in the checkout. They use the shared `desk/` sizing, policy and delegate modules. Keep [LICENSE](LICENSE) and [ATTRIBUTION.md](ATTRIBUTION.md) with the checkout and any copied instructions.
 
-That pin is a release tag, not a moving branch: the desk you build is the desk that was reviewed. Check the repository's releases for a newer tag before setting up, and do not swap the tag for `main` to pick up unreleased work.
+## 2. Create the five bots and install their skills
 
-`git clone` prints `warning: refs/tags/... is not a commit!` when it shallow-clones an annotated tag. That warning is expected and harmless: the clone still resolves to the tagged commit, which is why the command prints it. Judge the step by `scripts/check.sh`, not by that line.
+In Grok, create one bot per row. Copy its Name, Job and Description from the profile and paste the complete System prompt into its standing-instructions field. If only an initial message is supported, send the full prompt, ask for acknowledgement and record that this does not verify persistent instructions.
 
-`scripts/check.sh` is the desk's own structural check: it runs offline, touches no keys and no network, and confirms the skills, agents and manifests are intact and internally consistent. If it fails, stop and tell the user; do not build a desk from a tree that does not check out.
-
-Before using any agent profile or System prompt, run `git diff --exit-code refs/tags/v1.7.2 -- agents/` in the checkout. HEAD matching the tag does not prove the working files are unchanged. If the command reports differences or fails, name the affected paths, stop dependent setup and preserve the user's files.
-
-Record the commit `git rev-parse HEAD` printed. It goes into `desk.md` in section 8 as `instructions commit`, so the desk can always say which version of these rules it is running and the user can diff it later.
-
-If the clone fails, report the error and keep setup pending. Do not switch to plain HTTP or unpack an archive with unverified provenance. Structural checks establish internal consistency, not that an archive came from this release; a user-supplied archive still needs trusted release provenance before setup continues.
-
-## 2. Read the desk
-
-Read these before creating anything:
-
-1. `docs/ARCHITECTURE.md` - how the team fits together.
-2. `skills/hypergrok-bootstrap/SKILL.md` and `skills/desk-operating-model/SKILL.md` - setup and the rules every Bot follows.
-3. All seven files in `agents/` - each has a **Bot profile** (Name, Job, Description) and a full **System prompt**.
-4. `skills/README.md` - the index of skills and which Bot uses which.
-
-## 3. Prepare the desk computer (read-only)
-
-Follow `skills/hyperliquid-setup/SKILL.md` sections 1-3 only: install the Python SDK, confirm both Hyperliquid networks answer a public read, and create the working folders:
-
-```bash
-mkdir -p /workspace/trading-desk/{proposals,briefs,research,strategies,data,journal/incidents,watch}
-cd /workspace/hypergrok
-python3 scripts/opening_bell.py --coin ETH
-python3 scripts/desk_doctor.py --desk-root /workspace/trading-desk
-```
-
-Show the Opening Bell output to the user. It is a timestamped public market snapshot and must say that it is not a trading signal. A `desk.md` warning from the doctor is expected until section 8; a repository or public API failure is not. The API wallet steps come later, when the user asks to trade. Research, briefs and the strategy lab need no key.
-
-For a requested historical experiment, the Market Analyst and Strategist follow [Research datasets](docs/RESEARCH_DATASETS.md): explicit UTC bounds, a new saved bundle, coverage checks and offline replay before analysis. Do not fetch a large historical dataset as an automatic setup step. Dataset completeness does not establish an edge or change any approval gate.
-
-## 4. Create the Bots
-
-For each file in `agents/`, select one verified Bot or create a separate one. Use the profile card exactly:
-
-| File | Name | Job |
+| Bot | Prompt | Skill to install and enable |
 | --- | --- | --- |
-| `agents/desk-lead.md` | Desk Lead | Head of the Hyperliquid trading desk |
-| `agents/market-analyst.md` | Market Analyst | Hyperliquid market data and microstructure |
-| `agents/research-analyst.md` | Research Analyst | Fundamentals, news and catalyst research |
-| `agents/strategist.md` | Strategist | Strategy design and testing partner |
-| `agents/risk-manager.md` | Risk Manager | Risk limits, position sizing and book oversight |
-| `agents/execution-trader.md` | Execution Trader | Order execution on Hyperliquid |
-| `agents/trade-reviewer.md` | Trade Reviewer | Desk journal and post-trade review |
+| Desk Lead | `agents/signals-desk-lead.md` | `skills/signals-desk-intake/SKILL.md` |
+| Position Sizer | `agents/signals-position-sizer.md` | `skills/signals-position-sizing/SKILL.md` |
+| Risk Gate | `agents/signals-risk-gate.md` | `skills/signals-risk-gate/SKILL.md` |
+| Executor | `agents/signals-executor.md` | `skills/signals-execution/SKILL.md` |
+| Reviewer | `agents/signals-reviewer.md` | `skills/signals-review/SKILL.md` |
 
-For each Bot:
+Install the complete skill body for each bot. Read back saved instructions where supported and record each bot's ID and verification status. The Desk Lead trusts publications served by the private service and routes their unchanged envelopes; the Position Sizer computes size; the Risk Gate can refuse; the Executor alone submits through the door; the Reviewer reports recorded results. Intake does not verify publisher registration, veto status or receipt anchoring on a chain.
 
-- **Name** and **Job** from the profile card.
-- **Description** (the Bot's enduring rules) from the profile card, verbatim.
-- **Avatar:** the desk mascot at `/workspace/hypergrok/assets/mascot.jpg` (attach it from the computer, or let the user pick their own).
-- Then send the new Bot its full **System prompt** section as its first message, prefixed with: "These are your standing instructions. Confirm you have read them and state your job in one sentence." Ask it to keep the instructions in memory and to re-read its file at `/workspace/hypergrok/agents/<name>.md` whenever it is unsure.
+## 3. Create the Trading Floor
 
-Read back the native Name, Job and Description and compare them exactly with the profile. Before reuse or after creation, verify the complete standing System prompt through supported native readback. If a full persistent instruction field is not exposed, acceptable separate evidence is readback of the exact full System prompt delivered as a standing-instructions message, the Bot's acknowledgement that it follows the pinned agent file, and that local file's hash matching the expected bytes from `git show 'refs/tags/v1.7.2:agents/<name>.md'`. Hashing an arbitrary local file is insufficient. Record this as `delivery-and-pointer`, with the limitation that delivery and the checked target do not establish byte-identical persistent memory. A matching Description, summarized memory or file pointer alone is insufficient.
+Create a private group named **Trading Floor**, add the five bots and record the group and member IDs. Send this welcome message:
 
-If an existing seat differs, is missing or lacks both proof methods, create a separate Bot and verify it. Preserve the existing Bots and unrelated desks' profiles, prompts and memories. Record the selected native Bot IDs; names alone do not identify the intended seats. Grok Bot lets existing Bots create focused Bots. If a needed creation step or both supported verification methods are unavailable, give the user the exact profile card and full standing prompt for each affected role as labelled copy-and-paste blocks, and keep readiness pending until verified. The Grok Bot desk uses seven separate Bots, with one designated exchange writer.
+> Desk Lead routes publications; Position Sizer computes; Risk Gate checks; Executor alone submits through the door under its Signer policy; Reviewer records. Setup places no orders. New entries remain disabled until resting stop support is implemented and the delegate policy is confirmed.
 
-## 5. Install the skills
+## 4. Add the service credentials
 
-Skills in Grok Bot are shared across all of the user's Bots. Inspect the shared skills first: a Desk Lead added from the public HyperGrok template carries this release's bootstrap skill. Setup installs the remaining reviewed skills from the pinned checkout without creating duplicates.
+Use Grok's secret store for these two credentials. The door credential contains a client ID and client secret; bind both fields as required by the execution skill. Keep values out of chats, prompts, version control, logs and the setup record.
 
-For each directory under `skills/`, compare the source with actual supported native readback of the shared skill's exact name, exact description and complete Markdown body. Grok stores the name and description separately and rebuilds the YAML wrapper without source license or metadata. Remove frontmatter, leading empty lines and the final newline only when comparing bodies; preserve all internal text, spaces and line breaks, including trailing spaces within lines. The seventeen full-file hashes in `template/grok-bot.json` still verify the pinned checkout. Neither those hashes nor a staged save argument proves the native stored content.
+| Credential | Source and purpose | User |
+| --- | --- | --- |
+| `<DOOR_SERVICE_TOKEN>` | An access service token for the door, obtained from the Signer service operator for `<DOOR_ENDPOINT>`. | Executor |
+| `<SIGNALS_SUBSCRIBER_TOKEN>` | A revocable subscriber token obtained from the signal publisher for the private service at `<SIGNALS_SERVICE_ENDPOINT>`. | Desk Lead |
 
-Record exactly one status for each skill:
+Use only the configured account. The bots do not need a venue signing key or a publisher credential. Generate the delegate seed locally in step 6; never paste it into chat or the secret store. If the private service or subscriber credential is unavailable, intake remains idle. There is no public-feed fallback.
 
-1. `template`: an already-present shared skill independently read back and matched, then enabled for the selected Desk Lead. This does not claim all seventeen skills were exported by the public share.
-2. `installed`: a missing skill saved with exact source name, description and normalized body, then independently read back and matched.
-3. `pointer`: if the app cannot save the body, save the source name and description with "When this skill is used, read `/workspace/hypergrok/skills/<name>/SKILL.md` and follow it." Verify the complete stored pointer text and target's full-file hash.
-4. `mismatch`: native content differs or cannot be read back completely. Name the reason and fail native readiness. Do not overwrite shared content used by unrelated desks without user authority.
+## 5. Schedule the three pre-open routines in UTC
 
-The receipt must list exactly seventeen unique names, one status and native readback evidence or an unavailable reason for each. A name, local file or staged argument alone is insufficient.
+Create exactly three Grok routines owned by the Desk Lead, with timezone **UTC**. Each invokes `signals-desk-intake` using the private subscriber credential and routes results through the recorded Trading Floor. Keep entry submission disabled.
 
-When copying a skill into another workspace or distributing the desk, retain its `LICENSE` and `ATTRIBUTION.md` beside the instructions. If the destination only accepts a single instruction field, keep the complete license notice in its accompanying project documentation or third-party notices. See [reuse and attribution](ATTRIBUTION.md); stars and public credit links are optional.
+Schedule each routine **15 minutes before** its session open. Assume Tokyo opens at 09:00 JST, London at 08:00 UK local time, and New York at 09:30 Eastern Time. These are scheduling assumptions; venue hours may differ.
 
+| Routine | Assumed session open | Open in UTC | Routine in UTC |
+| --- | --- | --- | --- |
+| Before Tokyo | 09:00 JST (UTC+09:00), year-round | 00:00 | **23:45 on the preceding UTC date** |
+| Before London | 08:00 GMT (UTC+00:00), standard time | 08:00 | **07:45** |
+| Before London | 08:00 BST (UTC+01:00), daylight time | 07:00 | **06:45** |
+| Before New York | 09:30 EST (UTC-05:00), standard time | 14:30 | **14:15** |
+| Before New York | 09:30 EDT (UTC-04:00), daylight time | 13:30 | **13:15** |
 
-Skills to install (17):
+The seasonal rows are alternatives for the same London and New York routines. Run on session weekdays and skip the relevant market holidays. Tokyo's Monday–Friday opens correspond to Sunday–Thursday routine dates in UTC.
 
-- Bootstrap: `hypergrok-bootstrap`
-- Hyperliquid: `hyperliquid-setup`, `hyperliquid-market-data`, `hyperliquid-account`, `hyperliquid-orders`, `hyperliquid-positions`, `hyperliquid-websocket`, `hyperliquid-advanced`, `hyperliquid-api-reference`
-- Desk: `desk-operating-model`, `desk-trade-lifecycle`, `desk-risk-limits`, `desk-execution-protocol`, `desk-monitoring`, `desk-post-trade-review`, `desk-incident-response`, `desk-strategy-lab`
+London changes on the last Sunday in March and October; New York changes on the second Sunday in March and first Sunday in November. Adjust each UTC routine independently at its session's transition. Verify the displayed next run in UTC and record the three routine IDs, timezone and next run dates and times. If intake is unavailable, report that fact and leave the desk idle.
 
-Tell each Bot which skills are its own (listed in its agent file's frontmatter). Any Bot may read any skill; the Execution Trader is the one Bot that acts on the write paths in `hyperliquid-orders`, `hyperliquid-positions` and `hyperliquid-advanced`.
+## 6. Generate the Executor delegate and register its policy
 
-## 6. Create the Trading Floor
+Prepare private `desk/config.json` from [desk/config.example.json](desk/config.example.json) as described in the execution skill. Replace all placeholders, use `<ACCOUNT_ADDRESS>` consistently for `account_address`, `vault_address` and `policy.vault_address`, and set mode 0600. Routine-driven workspaces must set `resident: false` and `stop_mode: software`; the example's resident default is for the continuously running service. Protect the key, journal and control socket directories with owner-only permissions.
 
-Create one private group chat named **Trading Floor** with the selected native Bot IDs for exactly these six roles: Desk Lead, Market Analyst, Research Analyst, Strategist, Risk Manager, Execution Trader. (Grok Bot group chats hold up to six Bots; the Trade Reviewer works from its own conversation and by direct message.) Reuse a group only when its ID is already selected for this desk and native readback confirms exactly those six member IDs. Preserve prior groups; a matching name alone is insufficient. Record the group ID and membership IDs. If creation or membership readback is unavailable, return the exact manual step and keep group readiness pending. Send the welcome message and later role checks to the recorded Floor ID.
+In the Executor's persistent workspace, run once from the checkout root:
 
-Post this as the first message in the group:
-
-> Welcome to the Trading Floor. Desk Lead routes; Market Analyst and Research Analyst bring evidence; Strategist helps the user test their own ideas; Risk Manager sizes and can refuse; Execution Trader is the one Bot that sends orders, on a ticket the user approved by id. Rules: `/workspace/hypergrok/skills/desk-operating-model/SKILL.md`. Trade Reviewer is a DM away. Today is setup: nothing goes to the exchange.
-
-## 7. Approvals
-
-Ask the user to open **Settings, General, Auto-review** and add an **Ask first** rule for financial actions and for commands that call the Hyperliquid exchange endpoint. Verify that the native control covers SDK calls, scripts and direct HTTP through the supported settings or a non-sending approval preview; do not submit a live order to test it. Record the coverage evidence in `desk.md`. If coverage cannot be established, keep the desk research-only, do not provision an API wallet key, and report the exact missing control. Chat approval and a command-matching hook cannot substitute for this gate.
-
-The native rule enforces approval outside Bot-authored messages. The phrase in chat records the exact ticket the user approved; it cannot substitute for that control.
-
-Then ask the user one question: **may the desk place a protective stop for a position that has none, without waiting for approval?** It is reduce-only, so it can only reduce exposure, and the alternative is a naked position waiting on someone to read a message. If yes, record it in `desk.md` under `standing approvals` with the date. If no, record that too, along with how long the desk should chase them before telling them to fix it in the Hyperliquid app themselves.
-
-## 8. Write the desk record
-
-Ask the user two questions, then write `/workspace/trading-desk/desk.md`:
-
-Record only verified Bot, group and member IDs as observed; mark uncreated, manual or unverified roles and any unverified Floor as pending rather than copying the desired seven-Bot/six-member inventory as an observed result.
-
-1. Engagement level: **research** (no key), **testnet** (play money, recommended to start), or **mainnet**.
-2. If testnet or mainnet: the Hyperliquid account address the desk should read (the main account, not an API wallet address).
-
-```markdown
-# Desk record
-
-- created: 2026-08-16 15:00 UTC
-- instructions commit: 0000000        # git rev-parse HEAD from step 1
-- engagement level: testnet
-- network: testnet
-- account: 0x...            # or "none" for a research desk
-- bots: Desk Lead, Market Analyst, Research Analyst, Strategist, Risk Manager, Execution Trader, Trade Reviewer
-- bot ids: <role to verified native Bot ID>
-- group chats: Trading Floor (6)
-- trading floor id and member ids: <verified native group and six Bot IDs>
-- risk limits: not yet written  (Risk Manager runs the interview: skills/desk-risk-limits)
-- standing approvals: none          # recommended: protective stops (reduce-only), any network
-- exchange approval gate: unverified # evidence of native coverage required before provisioning a key
-- unprotected position deadline: 15m  # chase this long, then tell the user to fix it in the app
-- status: research-only until the native gate is verified, limits exist and an API wallet is provisioned
+```sh
+python3 -m desk.desk_keygen desk/config.json
 ```
 
-Then hand the Risk Manager the `desk-risk-limits` interview to write `risk-limits.md` with the user. It is short, and it is where the user decides how the desk trades for them.
+Key generation creates the seed exclusively at mode **0600** and prints only the ed25519 public hex. Verify the file mode without reading the seed. Do not overwrite or delete an existing seed to repeat setup.
 
-## 9. Verify the desk (read-only)
+Register `<EXECUTOR_PUBLIC_HEX>` as a delegate with a policy on **signer-1**, following the public [Signer project at TraderSwift](https://github.com/traderswift-io/signer). Supply only the public key for registration; retain the seed locally. Confirm the registered account, signing-key reference, policy epoch, allowed assets, per-order and daily size caps, expiry and revocation state with the Signer service operator. Record the confirmed policy and copy its values into the private config. A different delegate's policy does not authorize this key. If multiple delegates share an account budget, confirm their allocations fit that budget before enabling execution.
 
-Run the desk-wide checks first:
+Set `delegate_public_key` to the printed hex in the read-only role configs, together with the issued `key_ref`, current policy and read access to the Executor's current journal. Do not distribute the seed or door credentials to those roles. A lost workspace requires a new locally generated key and a newly registered policy.
 
-```bash
-cd /workspace/hypergrok
-python3 scripts/desk_doctor.py --desk-root /workspace/trading-desk
-python3 scripts/opening_bell.py --coin BTC
-```
+## 7. Verify configuration with new entries disabled
 
-Then run these and record the results:
+The current implementation refuses routine-driven entries with `no_resting_stop_until_rotation` for both `software` and `trigger` settings. Selecting `trigger` does not create a resting stop. Keep `resident: false`; do not change residency to bypass this guard.
 
-1. In the Trading Floor, ask: "@Market Analyst brief us on BTC." Expect a timestamped brief with sources.
-2. Ask: "@Risk Manager assuming equity of 10,000 USD and the current limits, size a hypothetical long BTC with a 1% stop." Expect a PASS or REJECT with the arithmetic and a ticket, and a note that nothing will be sent.
-3. Ask: "@Execution Trader what would you need before sending that ticket?" Expect the pre-send checklist, including native approval coverage, fresh account capacity and retained pending reservations, and a refusal to send without the exact ticket's approval.
-4. DM the Trade Reviewer: "Open today's journal and record that the desk was set up." Expect a journal entry.
-5. Ask the Research Analyst for one sourced fact about Hyperliquid itself.
+Readiness for future entries requires implemented resting stop support, a confirmed delegate policy and available service credentials. A service announcement or calendar date alone does not meet those requirements. Existing software exits belong to the continuously running executor and do not protect a routine-driven entry.
 
-## 10. Return the receipt
+Check secret presence without displaying values, bot and skill configuration, and the UTC schedules. Rehearse with the committed fake-service scenarios described in [desk/README.md](desk/README.md). Never place a live order to verify setup. Key generation, cancellation and reduce-only closeout remain available through the existing commands and policy checks.
 
-Finish by giving the user:
+## 8. Record the setup result
 
-- the seven Bot IDs, created/reused/manual-card status, profile comparison and standing-instruction proof method, including any `delivery-and-pointer` limitation
-- each skill's status, native readback method or unavailable reason, normalized stored body length/hash and comparison result; distinguish pointer evidence
-- the Trading Floor ID and verified member IDs
-- the desk record and its engagement level
-- native exchange approval coverage, or the exact blocker keeping the desk research-only
-- the desk doctor and Opening Bell results
-- the results of the five verification checks
-- confirmation that setup stayed read-only: no key requested, no order placed
+Record the reviewed commit and workspace paths; five bot IDs and prompt/skill verification status; Trading Floor ID and member IDs; and credential names with presence status only. Include the three routine IDs and next UTC runs, public delegate hex, verified seed mode, registered policy and caps, and resting stop support status.
 
-Only after the required native and role checks pass, say: "The desk is ready. Ask the Desk Lead for a market brief to see it work. When you want to trade with play money, say 'set up a testnet API wallet' and it will walk you through `hyperliquid-setup` step 4." Otherwise name the failed or pending check and next safe action.
-
-## If you are not Grok Bot
-
-Use the guide for your runtime:
-
-- [Claude Code](docs/hyperliquid-claude-code.md): plugin skills, subagents and the exchange-write confirmation hook. Invoke `/hypergrok:desk-operating-model` explicitly; `rules/` is not a Claude Code plugin component.
-- [Cursor](docs/hyperliquid-cursor.md): skills, role profiles and the declared desk rules.
-- [Grok Build](docs/hyperliquid-grok-build.md): skills and agent directories; rule loading remains unverified.
-- [Codex](docs/hyperliquid-codex.md): skills, with role prompts run as labelled passes.
-- [Gemini CLI](docs/hyperliquid-gemini-cli.md): skills and `GEMINI.md`, with role prompts run as labelled passes.
-
-Grok Bot's cloud paths, native Bot creation and Trading Floor steps do not describe these runtimes. Use their supported workspace and role mechanisms, and report what actually loaded. Preserve the desk's evidence standard, Risk PASS, exact ticket approval, expiry, single writer, single send and reconciliation. Verify native approval coverage for the actual SDK, script and HTTP routes before provisioning a key; a command-matching hook alone is insufficient. If coverage is unavailable, remain in research mode.
+Finish with the actual state: **setup pending** or **configured with new entries disabled** for this version. Identify missing credentials, unavailable service access or an unconfirmed policy. Never include credential values or the private seed.
