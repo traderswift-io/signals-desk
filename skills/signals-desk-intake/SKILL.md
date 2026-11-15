@@ -48,15 +48,14 @@ This skill runs exactly:
 - `GET https://chain.traderswift.io/network/v1/charter/signals`
 - `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`
 - `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`
-- `POST /v1/deliveries {signal_id, event_id}`
 
-Read the private Signals service on the UTC schedule before the Tokyo, London and New York opens using the subscriber token supplied by the signal publisher and stored in the secret store. For every signal read, report delivery with `POST /v1/deliveries {signal_id, event_id}` using the identifiers returned by the service. After chain verification passes, post each publication as a Trading Floor ticket and save its unchanged envelope as `<envelope.json>` for the Position Sizer. Assets outside policy are posted as "published, not traded in the demo" and are not routed to execution.
+Read the private Signals service on the UTC schedule before the Tokyo, London and New York opens using the subscriber token supplied by the signal publisher and stored in the secret store. The service records each signal returned by GET for this desk's token, so this seat makes no delivery report. After chain verification passes, post each publication as a Trading Floor ticket and save its unchanged envelope as `<envelope.json>` for the Position Sizer. Assets outside policy are posted as "published, not traded in the demo" and are not routed to execution.
 
 Report the command's printed numbers, never your own arithmetic. Quote service fields as returned. No separate sizer, policy implementation, delegate client or hand-built exchange request.
 
 ## Unknown results
 
-A failed read means no ticket. If the anchor is not there yet, keep the unchanged envelope pending and wait for the next routine; no retry loop. An unavailable or rate-limited chain endpoint, missing or ambiguous verification, a hash or publisher mismatch, or any anchor, provider or charter veto blocks ticket posting, handoff and downstream action. Report the reason and wait for the next routine before another chain read. A delivery acknowledgement does not prove chain verification; there is no trust-the-service fallback. A failed delivery report remains pending with its original signal_id and event_id; report the failure and never claim it was acknowledged.
+A failed read means no ticket. If the anchor is not there yet, keep the unchanged envelope pending and wait for the next routine; no retry loop. An unavailable or rate-limited chain endpoint, missing or ambiguous verification, a hash or publisher mismatch, or any anchor, provider or charter veto blocks ticket posting, handoff and downstream action. Report the reason and wait for the next routine before another chain read. There is no trust-the-service fallback. Report the read failure and never invent missing service fields.
 
 ## Reconciliation
 
@@ -76,7 +75,7 @@ Report every verification result in the Trading Floor, then post a ticket only o
 
 ```text
 VERIFY | <signal_id> | pass|<reason>
-TICKET | <signal_id> | <event_id> | <published fields> | <delivery status> | <next seat>
+TICKET | <signal_id> | <published fields> | <next seat>
 ```
 
 Quote the printed output or service fields faithfully, including refusals and missing values.

@@ -37,7 +37,6 @@ INTAKE_ALLOWED_CALLS = {
     'GET /network/v1/charter/signals',
     'GET /network/v1/provider/signals/<provider_id>',
     'GET /network/v1/anchor/signals/signal/<signal_id>/<provider_id>',
-    'POST /v1/deliveries {signal_id, event_id}',
 }
 
 
@@ -96,7 +95,10 @@ def check_intake():
     check_pair(prompt, intake)
     broken_prompts = [prompt.replace(delegation, 'This desk trusts the served publication; no hub verification.'),
                       prompt.replace('- `GET /v1/signals`\n', ''),
-                      prompt + '\n- `POST /v1/orders`\n']
+                      prompt + '\n- `POST /v1/orders`\n',
+                      prompt + '\n- `POST /v1/deliveries`\n',
+                      prompt + '\n- `POST /v1/deliveries {signal_id, event_id}`\n',
+                      prompt + '\n- `DELETE /v1/signals`\n']
     chain_calls = re.findall(r'^- `(GET https://[^`]+)`', prompt, re.MULTILINE)
     assert len(chain_calls) == 3
     broken_skills = [intake + '\n- `POST /v1/orders`\n',
@@ -115,6 +117,12 @@ def check_intake():
         except AssertionError:
             continue
         raise AssertionError('Conflicting intake prompt accepted')
+    for operation in ('POST /v1/orders', 'POST /v1/deliveries', 'POST /v1/deliveries {signal_id, event_id}', 'PUT /v1/signals'):
+        try:
+            check_pair(prompt, intake + '\n- `' + operation + '`\n')
+        except AssertionError:
+            continue
+        raise AssertionError('Conflicting intake skill accepted')
 
 
 def check_sizer():

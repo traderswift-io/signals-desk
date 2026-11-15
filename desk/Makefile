@@ -4,3 +4,4 @@ check:
 	cd .. && python3 -B -m desk.desk_scenarios
 	cd .. && python3 -B -m desk.desk_scenarios_anchor
 	cd .. && python3 -B -m desk.desk_scenarios_anchor_decoding
+	cd .. && python3 -B -m desk.desk_scenarios_deliveries
