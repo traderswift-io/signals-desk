@@ -25,7 +25,7 @@ async def read_chain(session, base, path, kind, reads, timeout):
     try:
         async with session.get(base + path, timeout=timeout, allow_redirects=False) as response:
             reads.append(response.status)
-            if response.status == 429:
+            if response.status == 429 or response.status >= 500:
                 raise ValueError('chain_unavailable')
             if response.status != 200:
                 raise ValueError(kind + '_missing')
@@ -37,7 +37,7 @@ async def read_chain(session, base, path, kind, reads, timeout):
         raise ValueError('chain_unavailable') from None
     if not isinstance(body, dict):
         raise ValueError('chain_unavailable')
-    if body.get('vetoed') is True:
+    if body.get('vetoed') is not False:
         raise ValueError(kind + '_vetoed')
     return body
 
