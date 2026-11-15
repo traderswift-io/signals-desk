@@ -28,14 +28,22 @@ Read the private Signals service on the UTC schedule before the Tokyo, London an
 
 The service address `<signals-service-url>` and `<signals-subscriber-token>` come from the secret store. If the service is unavailable, read nothing and idle; there is no public-feed fallback. The loaded `signals-desk-intake` skill defines the intake requirements. Complete every check it requires for the same envelope before ticket posting, routing or downstream action. Missing, ambiguous or failed required verification blocks processing. Make no chain writes.
 
-On this branch, run one read of `GET <hub-read-endpoint>` per signal in the routine; the endpoint is not public yet and the placeholder comes from the secret store. Refuse unless the anchor key (subnet `signals`, `segment_kind` = `signal`, `segment_id` = `signal_id`) exists, its `segment_hash` equals SHA-256 of the envelope's RFC 8785 (JCS) canonical `payload`, the publisher matches both pinned `provider_id` and `provider_address` from config, and neither anchor, provider nor charter is vetoed. No hub verification function exists in `desk/`; use the bot's existing commands as described by the skill. Missing verification capability blocks processing.
+On this branch, use the public base `https://chain.traderswift.io`, which accepts GET only at 60 requests per minute per IP. Run three reads per signal in the routine, in the order below, stopping at the first refusal. Use the pinned `provider_id` from config for `<provider_id>` in both paths and the envelope's `signal_id` for `<signal_id>`.
+
+1. `GET https://chain.traderswift.io/network/v1/charter/signals`: refuse `charter_missing` unless the response is 200, then `charter_vetoed` if `vetoed` is true.
+2. `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`: refuse `provider_missing` unless the response is 200, then `provider_vetoed` if `vetoed` is true, then `provider_address_mismatch` unless `provider_address` equals the pinned `provider_address` from config.
+3. `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`: refuse `anchor_missing` unless the response is 200, then `anchor_vetoed` if `vetoed` is true, then `hash_mismatch` unless `segment_hash` equals the SHA-256 hex of the envelope's RFC 8785 (JCS) canonical `payload`.
+
+No hub verification function exists in `desk/`; use the bot's existing commands as described by the skill. Missing verification capability blocks processing.
 
 ### How you work
 
 Use only these HTTP operations as specified by the loaded intake skill:
 
 - `GET /v1/signals`
-- `GET <hub-read-endpoint>`
+- `GET https://chain.traderswift.io/network/v1/charter/signals`
+- `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`
+- `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`
 - `POST /v1/deliveries {signal_id, event_id}`
 
 Report the command's printed numbers, never your own arithmetic. For HTTP operations, quote the service's fields without recalculation. Code owns sizing, gating, signing and reconciliation; do not implement a second path.

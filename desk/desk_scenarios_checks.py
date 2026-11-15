@@ -34,7 +34,9 @@ SIGNALS_PROMPTS = {
 
 INTAKE_ALLOWED_CALLS = {
     'GET /v1/signals',
-    'GET <hub-read-endpoint>',
+    'GET /network/v1/charter/signals',
+    'GET /network/v1/provider/signals/<provider_id>',
+    'GET /network/v1/anchor/signals/signal/<signal_id>/<provider_id>',
     'POST /v1/deliveries {signal_id, event_id}',
 }
 
@@ -85,23 +87,31 @@ def check_intake():
         assert 'before ticket posting, routing or downstream action' in common
         assert 'Missing, ambiguous or failed required verification blocks processing.' in common
         assert 'trusts the served publication' not in common and 'no hub verification' not in common
-        operations = set(re.findall(r'^- `(GET [^`]+|POST [^`]+)`', skill, re.MULTILINE))
-        allowed = set(re.findall(r'^- `(GET [^`]+|POST [^`]+)`', common, re.MULTILINE))
+        pattern = r'^- `([A-Z]+) (?:https://chain\.traderswift\.io(?=/network/v1/))?([^`]+)`'
+        operations = {method + ' ' + path for method, path in re.findall(pattern, skill, re.MULTILINE)}
+        allowed = {method + ' ' + path for method, path in re.findall(pattern, common, re.MULTILINE)}
         assert operations == allowed == INTAKE_ALLOWED_CALLS
-        if 'GET <hub-read-endpoint>' in INTAKE_ALLOWED_CALLS:
-            assert 'trusts the served publication' not in skill and 'no hub verification' not in skill
-        else:
-            assert 'trusts the served publication; it adds no hub verification' in skill
+        assert 'trusts the served publication' not in skill and 'no hub verification' not in skill
 
     check_pair(prompt, intake)
     broken_prompts = [prompt.replace(delegation, 'This desk trusts the served publication; no hub verification.'),
                       prompt.replace('- `GET /v1/signals`\n', ''),
                       prompt + '\n- `POST /v1/orders`\n']
-    if 'GET <hub-read-endpoint>' in INTAKE_ALLOWED_CALLS:
-        broken_prompts.append(prompt.replace('- `GET <hub-read-endpoint>`\n', ''))
-    for broken in broken_prompts:
+    chain_calls = re.findall(r'^- `(GET https://[^`]+)`', prompt, re.MULTILINE)
+    assert len(chain_calls) == 3
+    broken_skills = [intake + '\n- `POST /v1/orders`\n',
+                     intake + '\n- `GET <hub-read-endpoint>`\n',
+                     intake + '\n- `DELETE /v1/signals`\n']
+    for call in chain_calls:
+        broken_prompts.append(prompt.replace('- `' + call + '`\n', ''))
+        broken_skills.append(intake.replace('- `' + call + '`\n', ''))
+        broken_skills.append(intake.replace(call, call.replace('GET ', 'POST ')))
+        broken_skills.append(intake.replace(call, call.replace('https://', 'https://unknown.')))
+        broken_skills.append(intake.replace(call, call + '/unknown'))
+    for common, skill in ([(broken, intake) for broken in broken_prompts] +
+                          [(prompt, broken) for broken in broken_skills]):
         try:
-            check_pair(broken, intake)
+            check_pair(common, skill)
         except AssertionError:
             continue
         raise AssertionError('Conflicting intake prompt accepted')

@@ -16,18 +16,19 @@ Signals Desk adapts the upstream protocol layout; see [attribution](../../ATTRIB
 
 ## Inputs
 
-The UTC routine scheduled 15 minutes before each Tokyo, London and New York open (see [SETUP.md](../../SETUP.md)); `<signals-service-url>`, the subscriber token `<signals-subscriber-token>` and `<hub-read-endpoint>` from the secret store; the configured policy asset list and pinned `provider_id` and `provider_address`. Keep credentials in the authenticated HTTP client, never in chat or shell history.
+The UTC routine scheduled 15 minutes before each Tokyo, London and New York open (see [SETUP.md](../../SETUP.md)); `<signals-service-url>` and the subscriber token `<signals-subscriber-token>` from the secret store; the public chain base `https://chain.traderswift.io`; the configured policy asset list and pinned `provider_id` and `provider_address`. Keep credentials in the authenticated HTTP client, never in chat or shell history.
 
 ## Pre-send checklist
 
 The service address `<signals-service-url>` and `<signals-subscriber-token>` come from the secret store. If the service is unavailable, read nothing and idle; there is no public-feed fallback. The service is private; obtain the subscriber token from the signal publisher. This branch requires hub verification and makes no chain writes.
 
-Before posting a ticket or handing an unchanged envelope to the Position Sizer, run one read of `GET <hub-read-endpoint>` for that signal in the routine. The endpoint is not public yet; fill the placeholder from the secret store. Refuse the signal unless all of these checks explicitly pass for the same envelope:
+Before posting a ticket or handing an unchanged envelope to the Position Sizer, run three reads for that signal in the routine, in this order, stopping at the first refusal. The public chain base accepts GET only at 60 requests per minute per IP. Use the pinned `provider_id` from config for `<provider_id>` in both paths and the envelope's `signal_id` for `<signal_id>`:
 
-- The anchor key exists with subnet `signals`, `segment_kind` = `signal` and `segment_id` = `signal_id`.
-- The anchor's `segment_hash` equals SHA-256 of the RFC 8785 (JCS) canonical `payload` from that envelope.
-- The publisher matches both the pinned `provider_id` and `provider_address` from config.
-- Neither the anchor, provider nor charter is vetoed.
+1. `GET https://chain.traderswift.io/network/v1/charter/signals`: refuse `charter_missing` unless the response is 200, then `charter_vetoed` if `vetoed` is true.
+2. `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`: refuse `provider_missing` unless the response is 200, then `provider_vetoed` if `vetoed` is true, then `provider_address_mismatch` unless `provider_address` equals the pinned `provider_address` from config.
+3. `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`: refuse `anchor_missing` unless the response is 200, then `anchor_vetoed` if `vetoed` is true, then `hash_mismatch` unless `segment_hash` equals the SHA-256 hex of the RFC 8785 (JCS) canonical envelope `payload`. On `anchor_missing`, wait for the next routine; there is no retry loop.
+
+Today `charter/signals` answers 404, so every signal is refused `charter_missing`; this is the expected fail-closed result.
 
 No hub verification function exists in `desk/` in this version. Run these checks with the bot's existing commands; do not invent a desk command or substitute ordinary JSON serialization for JCS. Missing verification capability blocks processing. Everything after the Desk Lead remains unchanged.
 
@@ -38,7 +39,9 @@ The Signer policy is the approval; no chat approval phrase is required. Use only
 This skill runs exactly:
 
 - `GET /v1/signals`
-- `GET <hub-read-endpoint>`
+- `GET https://chain.traderswift.io/network/v1/charter/signals`
+- `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`
+- `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`
 - `POST /v1/deliveries {signal_id, event_id}`
 
 Read the private Signals service on the UTC schedule before the Tokyo, London and New York opens using the subscriber token supplied by the signal publisher and stored in the secret store. For every signal read, report delivery with `POST /v1/deliveries {signal_id, event_id}` using the identifiers returned by the service. After hub verification passes, post each publication as a Trading Floor ticket and save its unchanged envelope as `<envelope.json>` for the Position Sizer. Assets outside policy are posted as "published, not traded in the demo" and are not routed to execution.
