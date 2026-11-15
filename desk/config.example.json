@@ -1,5 +1,9 @@
 {
   "coordinator_url": "<coordinator-base-url>",
+  "signals_url": "<signals-base-url>",
+  "subscriber_token_file": "<subscriber-token-file>",
+  "signals_access_client_id": "<signals-service-token-id>",
+  "signals_access_client_secret": "<signals-service-token-secret>",
   "builder_dexs": ["xyz"],
   "resident": true,
   "stop_mode": "software",

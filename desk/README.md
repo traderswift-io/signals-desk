@@ -26,6 +26,9 @@ The ticket CLI also defaults to `desk/config.json` and prints one JSON object. `
 
 The consumer uses blocking stream reads and persists the last processed stream id. A Redis connection failure is recorded, cancels active tickets through the normal reduce-only closeout, and stops the consumer; restart resumes from the saved cursor. It holds an exclusive record lock. A cancel command uses the running executor's local control socket; when no executor is running, it acquires that lock and reconciles outstanding tickets before cancellation. Startup recovery closes outstanding exposure and never resends an entry. Use a single configured record for a follower account and keep it across restarts.
 
+Set `signals_url`, `subscriber_token_file` (read once at startup), `signals_access_client_id` and `signals_access_client_secret` for delivery reports.
+Reports run in background tasks and never block trading; pending reports retry oldest first, up to ten per stream entry and after startup recovery, respecting `Retry-After`.
+
 From this directory:
 
 ```sh

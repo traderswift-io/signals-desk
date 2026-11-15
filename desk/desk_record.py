@@ -96,6 +96,16 @@ def reader_cursor(config):
     return rows[-1]['stream_id'] if rows else '0-0'
 
 
+def pending_deliveries(config):
+    pending = {}
+    for row in read_records(config['record_path']):
+        if row['event'] == 'delivery_pending':
+            pending[row['event_id']] = row
+        elif row['event'] == 'delivery_reported':
+            pending.pop(row['event_id'], None)
+    return list(pending.values())
+
+
 def writer_lock(config):
     stream = Path(config['record_path'] + '.lock').open('a')
     try:

@@ -1,0 +1,222 @@
+import asyncio
+import json
+import tempfile
+from contextlib import asynccontextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import aiohttp
+from aiohttp import web
+
+from .desk_deliveries import finish_deliveries, prepare_deliveries, schedule_delivery
+from .desk_executor import cancel, create_runtime, event_worker, recover, shutdown
+from .desk_record import append_record, now_ms, pending_deliveries, read_records
+from .desk_scenarios_fakes import signal_envelope, start_fake, stop_fake
+from .desk_scenarios_redis import stream_fields
+from .desk_signal_consumer import consume
+
+
+async def deliveries(request):
+    state = request.app['state']
+    state['posts'].append({'body': await request.json(), 'headers': dict(request.headers)})
+    state['arrived'].set()
+    if state['hold']:
+        await state['release'].wait()
+    if state.get('raw') is not None:
+        return web.Response(text=state['raw'], content_type='application/json')
+    return web.json_response(state['body'], status=state['status'], headers=state['headers'])
+
+
+@asynccontextmanager
+async def fixture():
+    with tempfile.TemporaryDirectory() as directory:
+        async with aiohttp.ClientSession() as session:
+            directory = Path(directory)
+            runtime, trading, trading_runner = await start_fake(directory, session)
+            state = {'posts': [], 'status': 200, 'body': {'recorded': True}, 'headers': {},
+                     'hold': False, 'arrived': asyncio.Event(), 'release': asyncio.Event()}
+            application = web.Application()
+            application['state'] = state
+            application.add_routes([web.post('/v1/deliveries', deliveries)])
+            runner = web.AppRunner(application)
+            await runner.setup()
+            site = web.TCPSite(runner, '127.0.0.1', 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            token = directory / 'subscriber.token'
+            token.write_text('fake-subscriber-token\n')
+            runtime['config'].update(signals_url=f'http://127.0.0.1:{port}', subscriber_token_file=str(token),
+                                     signals_access_client_id='fake-signals-id',
+                                     signals_access_client_secret='fake-signals-secret')
+            prepare_deliveries(runtime)
+            try:
+                yield runtime, state, trading
+            finally:
+                state['release'].set()
+                await finish_deliveries(runtime)
+                await runner.cleanup()
+                await stop_fake(runtime, trading_runner)
+
+
+def rows(runtime, event):
+    return [row for row in read_records(runtime['config']['record_path']) if row['event'] == event]
+
+
+def posted(state):
+    return [post['body']['event_id'] for post in state['posts']]
+
+
+async def entry(runtime, signal_id, event_id=None, timestamp=None, asset='ETH', fields=None):
+    if fields is None:
+        fields = stream_fields(signal_envelope(signal_id, asset))
+        fields['event_id'] = event_id or 'event-' + signal_id
+        fields['ts'] = str(now_ms() if timestamp is None else timestamp)
+    client = SimpleNamespace(xread=AsyncMock(return_value=[('signals', [('1-0', fields)])]))
+    await consume(runtime, client, 1)
+
+
+async def check_success():
+    async with fixture() as (runtime, state, trading):
+        await entry(runtime, 'first', asset='BTC')
+        await finish_deliveries(runtime)
+        assert len(state['posts']) == 1
+        post = state['posts'][0]
+        assert post['body'] == {'signal_id': 'first', 'event_id': 'event-first'}
+        assert post['headers']['Authorization'] == 'Bearer fake-subscriber-token'
+        assert post['headers']['CF-Access-Client-Id'] == 'fake-signals-id'
+        assert post['headers']['CF-Access-Client-Secret'] == 'fake-signals-secret'
+        assert [row['event_id'] for row in rows(runtime, 'delivery_reported')] == ['event-first']
+        assert not pending_deliveries(runtime['config'])
+        Path(runtime['config']['subscriber_token_file']).unlink()
+        await entry(runtime, 'first', asset='BTC')
+        await finish_deliveries(runtime)
+        assert posted(state) == ['event-first', 'event-first']
+        assert rows(runtime, 'consumed')[-1]['result'] == {'refused': 'already_acted'}
+        assert len(trading['intents']) == 1
+        assert state['posts'][-1]['headers']['Authorization'] == 'Bearer fake-subscriber-token'
+
+
+async def check_unavailable():
+    async with fixture() as (runtime, state, _):
+        state['status'] = 503
+        await entry(runtime, 'first')
+        await finish_deliveries(runtime)
+        assert pending_deliveries(runtime['config'])[0]['status'] == 503
+        state['status'] = 200
+        await entry(runtime, 'second')
+        await finish_deliveries(runtime)
+        assert posted(state) == ['event-first', 'event-first', 'event-second']
+        assert [row['event_id'] for row in rows(runtime, 'delivery_reported')] == ['event-first', 'event-second']
+        assert not pending_deliveries(runtime['config'])
+        for index in range(12):
+            append_record(runtime['config']['record_path'], 'delivery_pending', signal_id='older',
+                          event_id=f'older-{index}', status=503)
+        append_record(runtime['config']['record_path'], 'delivery_pending', signal_id='older', event_id='older-0', status=503)
+        await entry(runtime, 'third')
+        await finish_deliveries(runtime)
+        assert posted(state)[3:] == [f'older-{index}' for index in range(10)] + ['event-third']
+        assert [row['event_id'] for row in pending_deliveries(runtime['config'])] == ['older-10', 'older-11']
+
+
+async def check_rate_limit():
+    async with fixture() as (runtime, state, _):
+        timestamp = now_ms()
+        state.update(status=429, headers={'Retry-After': '30'})
+        await entry(runtime, 'first', timestamp=timestamp)
+        await finish_deliveries(runtime)
+        pending = pending_deliveries(runtime['config'])
+        assert pending[0]['status'] == 429 and pending[0]['not_before'] == timestamp + 30000
+        state.update(status=200, headers={})
+        await entry(runtime, 'inside', timestamp=timestamp + 10000)
+        await finish_deliveries(runtime)
+        assert posted(state) == ['event-first', 'event-inside']
+        await entry(runtime, 'after', timestamp=timestamp + 30001)
+        await finish_deliveries(runtime)
+        assert posted(state) == ['event-first', 'event-inside', 'event-first', 'event-after']
+        assert not pending_deliveries(runtime['config'])
+
+
+async def check_timeout():
+    async with fixture() as (runtime, state, trading):
+        runtime['config']['request_timeout_seconds'] = 1
+        state['hold'] = True
+        await entry(runtime, 'first', asset='BTC')
+        assert rows(runtime, 'consumed')[-1]['result'] == {'state': 'filled'}
+        await asyncio.wait_for(state['arrived'].wait(), 5)
+        assert runtime['deliveries']['tasks'] and not rows(runtime, 'delivery_reported')
+        assert await cancel(runtime, 'first') == {'state': 'exited'}
+        assert trading['position'] == 0 and not state['release'].is_set()
+        assert not any(row.get('status') == 'timeout' for row in rows(runtime, 'delivery_pending'))
+        await finish_deliveries(runtime)
+        assert pending_deliveries(runtime['config'])[0]['status'] == 'timeout'
+
+
+async def check_restart():
+    async with fixture() as (runtime, state, trading):
+        state['status'] = 503
+        await entry(runtime, 'first', asset='BTC')
+        await finish_deliveries(runtime)
+        await shutdown(runtime)
+        restarted = create_runtime(runtime['config'], runtime['session'])
+        prepare_deliveries(restarted)
+        restarted['worker'] = asyncio.create_task(event_worker(restarted))
+        try:
+            assert pending_deliveries(restarted['config'])[0]['event_id'] == 'event-first'
+            state['status'] = 200
+            await recover(restarted)
+            assert trading['position'] == 0 and posted(state) == ['event-first']
+            schedule_delivery(restarted)
+            await finish_deliveries(restarted)
+            assert posted(state) == ['event-first', 'event-first']
+            assert not pending_deliveries(restarted['config'])
+            assert len([intent for intent in trading['intents'] if not intent.get('reduce_only', True)]) == 1
+        finally:
+            await finish_deliveries(restarted)
+            await shutdown(restarted)
+
+
+async def check_malformed():
+    async with fixture() as (runtime, state, _):
+        valid = stream_fields(signal_envelope('broken'))
+        broken = [{}, {**valid, 'envelope': '{'}, {**valid, 'envelope': 'null'},
+                  {**valid, 'correlation_id': 'different'}, {**valid, 'kind': 'unknown'},
+                  {**valid, 'ts': 'invalid'}, {**valid, 'event_id': ''}]
+        for fields in broken:
+            await entry(runtime, 'broken', fields=fields)
+        await finish_deliveries(runtime)
+        assert not state['posts'] and not rows(runtime, 'consumed')
+        assert len(rows(runtime, 'stream_refusal')) == len(broken)
+
+
+async def check_secrets():
+    async with fixture() as (runtime, state, _):
+        state['body'] = {'recorded': False, 'error': 'fake-subscriber-token fake-signals-id fake-signals-secret'}
+        for status in (400, 401, 403, 500, 200):
+            state['status'] = status
+            await entry(runtime, f'refused-{status}')
+            await finish_deliveries(runtime)
+            assert pending_deliveries(runtime['config'])[-1]['status'] == status
+        state.update(raw='fake-subscriber-token fake-signals-secret')
+        await entry(runtime, 'invalid-json')
+        await finish_deliveries(runtime)
+        assert not rows(runtime, 'delivery_reported')
+        text = Path(runtime['config']['record_path']).read_text()
+        assert all(secret not in text for secret in ('fake-subscriber-token', 'fake-signals-id', 'fake-signals-secret',
+                                                     'Authorization', 'CF-Access-Client-Id', 'CF-Access-Client-Secret'))
+
+
+async def main():
+    for name, check in [('1: body, headers, recorded and redelivery', check_success),
+                        ('2: 503 pending, ordered retries and ten-report limit', check_unavailable),
+                        ('3: Retry-After using stream timestamps', check_rate_limit),
+                        ('4: held response never delays trading', check_timeout),
+                        ('5: durable pending retried after recovery', check_restart),
+                        ('6: malformed stream entries never reported', check_malformed),
+                        ('7: credentials absent from records on failures', check_secrets)]:
+        await check()
+        print('PASS deliveries ' + name, flush=True)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
