@@ -28,7 +28,7 @@ Before posting a ticket or handing an unchanged envelope to the Position Sizer, 
 2. `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`: refuse `provider_missing` unless the response is 200, then `provider_vetoed` if `vetoed` is true, then `provider_address_mismatch` unless `provider_address` equals the pinned `provider_address` from config.
 3. `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`: refuse `anchor_missing` unless the response is 200, then `anchor_vetoed` if `vetoed` is true, then `hash_mismatch` unless `segment_hash` equals the SHA-256 hex of the RFC 8785 (JCS) canonical envelope `payload`. On `anchor_missing`, wait for the next routine; there is no retry loop.
 
-Today `charter/signals` answers 404, so every signal is refused `charter_missing`; this is the expected fail-closed result.
+A 404 on the charter read refuses the signal `charter_missing`; until the `signals` subnet is chartered on the chain, every signal is refused this way, which is the expected fail-closed result.
 
 No chain verification function exists in `desk/` in this version. Run these checks with the bot's existing commands; do not invent a desk command or substitute ordinary JSON serialization for JCS. Missing verification capability blocks processing. Everything after the Desk Lead remains unchanged.
 

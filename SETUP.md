@@ -22,7 +22,7 @@ In Grok, create one bot per row. Copy its Name, Job and Description from the pro
 | Executor | `agents/signals-executor.md` | `skills/signals-execution/SKILL.md` |
 | Reviewer | `agents/signals-reviewer.md` | `skills/signals-review/SKILL.md` |
 
-Install the complete skill body for each bot. Read back saved instructions where supported and record each bot's ID and verification status. The Desk Lead trusts publications served by the private service and routes their unchanged envelopes; the Position Sizer computes size; the Risk Gate can refuse; the Executor alone submits through the door; the Reviewer reports recorded results. Intake does not verify publisher registration, veto status or receipt anchoring on a chain.
+Install the complete skill body for each bot. Read back saved instructions where supported and record each bot's ID and verification status. The Desk Lead refuses a signal unless its charter, provider and anchor reads on the chain all pass, and routes only unchanged envelopes that pass them; the Position Sizer computes size; the Risk Gate can refuse; the Executor alone submits through the door; the Reviewer reports recorded results.
 
 ## 3. Create the Trading Floor
 
