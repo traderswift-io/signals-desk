@@ -2,7 +2,7 @@
 
 This guide documents the **TraderSwift demo desk** in Grok: five bots in a private Trading Floor, five role skills, two service credentials and three routines scheduled in UTC. The Signals service is private; obtain a subscriber token from the signal publisher. Setup generates the Executor's delegate key and places no orders.
 
-This guide is for the `signer` branch; `main` mirrors upstream unchanged. A `traderswift` branch is coming and is not yet published. Use a reviewed checkout of this fork and record its commit. The current release does not support resting stop orders for routine-driven bots, so their new entries remain disabled.
+This guide is for the `traderswift` branch; `main` mirrors upstream unchanged and `signer` is the same desk without chain verification. Use a reviewed checkout of this fork and record its commit. The current release does not support resting stop orders for routine-driven bots, so their new entries remain disabled.
 
 ## 1. Prepare the bot workspaces
 
@@ -61,7 +61,7 @@ London changes on the last Sunday in March and October; New York changes on the 
 
 ## 6. Generate the Executor delegate and register its policy
 
-Prepare private `desk/config.json` from [desk/config.example.json](desk/config.example.json) as described in the execution skill. Replace all placeholders, use `<ACCOUNT_ADDRESS>` consistently for `account_address`, `vault_address` and `policy.vault_address`, and set mode 0600. Routine-driven workspaces must set `resident: false` and `stop_mode: software`; the example's resident default is for the continuously running service. Protect the key, journal and control socket directories with owner-only permissions.
+Prepare private `desk/config.json` from [desk/config.example.json](desk/config.example.json) as described in the execution skill. Replace all placeholders, use `<ACCOUNT_ADDRESS>` consistently for `account_address`, `vault_address` and `policy.vault_address`, and set mode 0600. Routine-driven workspaces must set `resident: false` and `stop_mode: software`; the example's resident default is for the continuously running service. Protect the key, journal and control socket directories with owner-only permissions. Set `provider_id` and `provider_address` to the signal publisher's provider id and chain address, as given by the publisher; the Desk Lead and intake skill refuse a signal whose chain record does not match them.
 
 In the Executor's persistent workspace, run once from the checkout root:
 

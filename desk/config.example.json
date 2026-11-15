@@ -9,6 +9,8 @@
   "binance_symbols": {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT"},
   "access_client_id": "<service-token-id>",
   "access_client_secret": "<service-token-secret>",
+  "provider_id": "<publisher-provider-id>",
+  "provider_address": "<publisher-chain-address>",
   "key_ref": "<key-reference>",
   "vault_address": "<vault-address>",
   "account_address": "<same-vault-address>",

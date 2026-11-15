@@ -2,11 +2,11 @@
 
 Based on [HyperGrok Trading Desk](https://github.com/galleonlabs/hypergrok-trading-desk) by [Andrew Wilkinson](https://andrewwilkinson.io) and [Galleon Labs](https://github.com/galleonlabs). Used under the MIT license. This is a separate project with its own name because it changes the approval model; it is not HyperGrok and is not affiliated with or endorsed by its authors. See [ATTRIBUTION.md](ATTRIBUTION.md).
 
-Signals Desk is the TraderSwift demo desk for sizing, checking and executing published trade signals through a Signer delegate policy on signer-1. It uses a locally generated delegate key, never a venue signing key. The `main` branch mirrors upstream unchanged; this branch, `signer`, carries our changes. A `traderswift` branch is coming and is not yet published.
+Signals Desk is the TraderSwift demo desk for sizing, checking and executing published trade signals through a Signer delegate policy on signer-1. It uses a locally generated delegate key, never a venue signing key. The `main` branch mirrors upstream unchanged; `signer` carries our changes; this branch, `traderswift`, adds chain verification of each signal before intake hands it on.
 
 The Signals service is private. Obtain access and a subscriber token from the signal publisher; this repository does not provide a public signal feed.
 
-Follow [SETUP.md](SETUP.md) to configure five Grok bots in a private Trading Floor: Desk Lead, Position Sizer, Risk Gate, Executor and Reviewer. Their [five skills](skills/README.md) use the shared Python modules in `desk/`. Intake trusts the served publication; it does not verify publisher registration, veto status or receipt anchoring on a chain.
+Follow [SETUP.md](SETUP.md) to configure five Grok bots in a private Trading Floor: Desk Lead, Position Sizer, Risk Gate, Executor and Reviewer. Their [five skills](skills/README.md) use the shared Python modules in `desk/`. Before handing a signal on, intake reads the public chain endpoint `https://chain.traderswift.io` three times: the `signals` charter, the pinned provider (registration, veto and address) and the signal's anchor (veto and hash). Any failed read refuses the signal by name.
 
 Routine-driven bots currently refuse new entries with `no_resting_stop_until_rotation`. They must keep `resident: false`; selecting `trigger` does not implement resting stop protection. The continuously running executor supports software exits as documented in [desk/README.md](desk/README.md).
 
