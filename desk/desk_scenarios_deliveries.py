@@ -12,7 +12,7 @@ from aiohttp import web
 
 from .desk_deliveries import finish_deliveries, prepare_deliveries, schedule_delivery, write_delivery
 from .desk_executor import cancel, create_runtime, event_worker, recover, shutdown
-from .desk_record import now_ms, pending_deliveries, read_records
+from .desk_record import delivery_path, now_ms, pending_deliveries, read_records
 from .desk_scenarios_fakes import signal_envelope, start_fake, stop_fake
 from .desk_scenarios_redis import stream_fields
 from .desk_signal_consumer import consume
@@ -21,13 +21,16 @@ from .desk_signal_consumer import consume
 async def deliveries(request):
     state = request.app['state']
     body = await request.json()
-    state['posts'].append({'body': body, 'headers': dict(request.headers)})
+    state['posts'].append({'body': body, 'headers': dict(request.headers), 'path': request.path})
     state['arrived'].set()
     event_id = body.get('event_id')
     if not isinstance(event_id, str) or re.fullmatch(r'\d+-\d+', event_id) is None:
         return web.json_response({'recorded': False}, status=404)
     if state['hold']:
         await state['release'].wait()
+    if event_id in state.get('responses', {}):
+        body, content_type = state['responses'][event_id]
+        return web.Response(body=body, headers={'Content-Type': content_type})
     if state.get('raw') is not None:
         return web.Response(text=state['raw'], content_type='application/json')
     return web.json_response(state['body'], status=state['status'], headers=state['headers'])
@@ -66,7 +69,8 @@ async def fixture():
 
 
 def rows(runtime, event):
-    return [row for row in read_records(runtime['config']['record_path']) if row['event'] == event]
+    path = delivery_path(runtime['config']) if event.startswith(('delivery_', 'deliveries_')) else runtime['config']['record_path']
+    return [row for row in read_records(path) if row['event'] == event]
 
 
 def posted(state):
@@ -222,13 +226,14 @@ async def check_secrets():
         await entry(runtime, 'invalid-json', entry_id='600-0')
         await settle(runtime)
         assert not rows(runtime, 'delivery_reported')
-        text = Path(runtime['config']['record_path']).read_text()
+        text = Path(runtime['config']['record_path']).read_text() + Path(delivery_path(runtime['config'])).read_text()
         assert all(secret not in text for secret in ('fake-subscriber-token', 'fake-signals-id', 'fake-signals-secret',
                                                      'Authorization', 'CF-Access-Client-Id', 'CF-Access-Client-Secret'))
 
 
 async def main():
     from .desk_scenarios_delivery_safety import check_safety
+    from .desk_scenarios_delivery_persistence import check_persistence
 
     for name, check in [('1: body, headers, recorded and redelivery', check_success),
                         ('2: 503 pending, ordered retries and ten-report limit', check_unavailable),
@@ -240,6 +245,7 @@ async def main():
         await check()
         print('PASS deliveries ' + name, flush=True)
     await check_safety()
+    await check_persistence()
 
 
 if __name__ == '__main__':

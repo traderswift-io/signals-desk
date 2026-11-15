@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from .desk_deliveries import finish_deliveries, prepare_deliveries, queue_delivery, schedule_delivery
 from .desk_executor import create_runtime, event_worker, recover, shutdown
-from .desk_record import append_record, now_ms, pending_deliveries, read_records
+from .desk_record import append_record, delivery_path, now_ms, pending_deliveries, read_records
 from .desk_scenarios_deliveries import entry, fixture, posted, rows, settle
 from .desk_scenarios_fakes import signal_envelope
 from .desk_scenarios_redis import stream_fields
@@ -59,7 +59,7 @@ async def check_disabled_recovery():
                 assert posted(state) == ['1-0']
                 disabled = rows(restarted, 'deliveries_disabled')
                 assert len(disabled) == 1 and disabled[0]['reason'] in ('FileNotFoundError', 'ValueError', 'IsADirectoryError')
-                assert 'fake-subscriber-token' not in Path(restarted['config']['record_path']).read_text()
+                assert 'fake-subscriber-token' not in Path(delivery_path(restarted['config'])).read_text()
             finally:
                 await finish_deliveries(restarted)
                 await shutdown(restarted)
@@ -74,7 +74,7 @@ async def check_disabled_recovery():
 async def check_shutdown():
     async with fixture() as (runtime, state, _):
         state['hold'] = True
-        runtime['config']['request_timeout_seconds'] = 3600
+        runtime['config']['request_timeout_seconds'] = 30
         await entry(runtime, 'first')
         await asyncio.wait_for(state['arrived'].wait(), 5)
         for index in range(2, 102):
@@ -115,7 +115,9 @@ async def check_cursor_order():
             await entry(runtime, 'first')
         await settle(runtime)
         events = [row['event'] for row in read_records(runtime['config']['record_path'])]
-        assert events.index('delivery_pending') < events.index('cursor') < events.index('delivery_reported')
+        assert 'cursor' in events and not any(event.startswith('delivery_') for event in events)
+        assert [row['event'] for row in read_records(delivery_path(runtime['config']))] == [
+            'delivery_pending', 'delivery_reported']
     async with fixture() as (runtime, state, _):
         with patch('desk.desk_signal_consumer.queue_delivery', AsyncMock(side_effect=OSError('fake write failure'))):
             try:
@@ -199,7 +201,7 @@ async def check_task_errors():
             assert [row['reason'] for row in rows(runtime, 'delivery_error')] == ['RuntimeError']
             assert not diagnostics and not runtime['deliveries']['tasks'] and not state['posts']
             assert pending_deliveries(runtime['config'])[0]['status'] == 'queued'
-            assert 'fake-subscriber-token' not in Path(runtime['config']['record_path']).read_text()
+            assert 'fake-subscriber-token' not in Path(delivery_path(runtime['config'])).read_text()
             schedule_delivery(runtime)
             await settle(runtime)
             assert posted(state) == ['1-0']
@@ -290,6 +292,6 @@ async def check_safety():
                         ('15: task exceptions are retrieved and sanitized', check_task_errors),
                         ('16: odd timestamps still trade and cancel with reporting on or off', check_odd_timestamps),
                         ('17: delivery writes leave the loop and pending is not reread', check_journal_io),
-                        ('18: shutdown settles an in-flight journal write', check_write_cancellation)]:
+                        ('18: shutdown settles a delivery write within its budget', check_write_cancellation)]:
         await check()
         print('PASS deliveries ' + name, flush=True)

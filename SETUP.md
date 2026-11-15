@@ -67,6 +67,8 @@ Routine-driven (Grok) workspaces must remove `signals_url`, `subscriber_token_fi
 
 For the resident consumer, use an HTTPS `signals_url` without embedded credentials and the four delivery fields documented in [desk/README.md](desk/README.md). Reporting is off when `signals_url` is absent. If it is set but the token file is unreadable, empty or multi-line, reporting stays off and a sanitized `deliveries_disabled` reason is recorded; recovery and trading continue. Invalid delivery URLs or missing delivery credentials also disable reporting. Fix the configuration and restart to enable reports; entries consumed while reporting is disabled are not queued for later reporting.
 
+Protect `<record_path>.deliveries.jsonl` alongside the trading journal; all delivery rows use that separate file and lock. Set `TimeoutStopSec=15` in the resident unit's `[Service]` section and retain service-manager termination of the entire service process group before restart. The reporter waits at most 5 seconds for in-flight persistence during shutdown; a filesystem stuck below that is ended by the service manager's stop timeout, with queued or pending rows retained for restart.
+
 In the Executor's persistent workspace, run once from the checkout root:
 
 ```sh

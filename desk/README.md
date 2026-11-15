@@ -28,11 +28,13 @@ The consumer uses blocking stream reads and persists the last processed stream i
 
 Only the resident consumer sends `POST /v1/deliveries`, with the stream entry ID as `event_id`. Grok seats make no delivery report: the service records each signal returned by their GET for that desk's token. Assign one subscriber token to one desk. Set `signals_url`, `subscriber_token_file` (read once at startup), `signals_access_client_id` and `signals_access_client_secret` for resident delivery reports. Reporting is off when the `signals_url` key is absent. If the URL is set but the token file is unreadable, empty or multi-line, a sanitized `deliveries_disabled` reason is recorded and reporting stays off; recovery and trading continue. Invalid URLs or missing delivery credentials have the same behavior. Fix the configuration and restart to enable reporting; entries consumed while reporting is disabled are not queued.
 
-Trading never awaits delivery HTTP requests. The consumer awaits a durable `delivery_pending` row with status `queued` before saving its cursor and scheduling the POST. Delivery journal writes run through `asyncio.to_thread`, serialized within the reporter and coordinated with other journal writers by the existing file lock. Pending state is reconstructed once at startup and maintained in memory. Existing trading journal operations remain synchronous, so filesystem contention can still delay trading; this is not an absolute latency guarantee.
+The consumer waits only for the queued row to be fsynced in the delivery file before writing its cursor; it never waits for a POST. All delivery rows, including diagnostics, go to `<record_path>.deliveries.jsonl` with its own file lock. Delivery writes run through `asyncio.to_thread` and never hold the trading journal lock. Pending state is reconstructed once at startup from the delivery file alone and maintained in memory; there is no migration from trading journal rows. Existing trading code and its synchronous journal I/O are unchanged.
 
-One coalescing worker runs a sweep after startup recovery and on stream entries, including malformed entries. Each sweep retries at most ten eligible pending reports, oldest first by first insertion, plus the latest fresh report if present. Entries arriving during a sweep request another sweep; intermediate fresh entries remain in the pending backlog. There is no retry timer: future deadlines and idle backlogs wait for another stream entry or restart. A 429 stops the sweep immediately and persists a subscriber-wide cooldown, leaving fresh reports queued. Retry-After eligibility and deadlines use the local wall clock, never stream timestamps. All failures back off from 5 seconds, doubling up to 15 minutes; Retry-After can extend that delay. After 20 failed attempts, `delivery_abandoned` is terminal across restarts and replays. Each completed attempt writes one outcome row, without a `sending` row. Shutdown cancels the worker and gathers task outcomes, settling any journal write already in progress; unacknowledged rows remain pending for restart. Unexpected task errors record only their exception type as `delivery_error`.
+One coalescing worker runs a sweep after startup recovery and on stream entries, including malformed entries. Each sweep retries at most ten eligible pending reports, oldest first by first insertion, plus the latest fresh report if present. Entries arriving during a sweep request another sweep; intermediate fresh entries remain in the pending backlog. There is no retry timer: future deadlines and idle backlogs wait for another stream entry or restart. A 429 stops the sweep immediately and persists a subscriber-wide cooldown, leaving fresh reports queued. Retry-After eligibility and deadlines use the local wall clock, never stream timestamps. All failures back off: transport errors, timeouts, non-2xx responses, bad bodies (including decoding exceptions and missing acknowledgement), and 429 use wall-clock delays starting at 5 seconds and doubling up to 15 minutes; Retry-After can extend that delay. After 20 failed attempts, `delivery_abandoned` is terminal across restarts and replays. Each completed attempt writes one outcome row, without a `sending` row. Unexpected task errors record only their exception type as `delivery_error`; filesystem failures are supervised separately from HTTP attempt failures.
 
-Acknowledged stream IDs can be reported again on replay, and ambiguous responses can cause repeat POSTs; service idempotency is required. Trading deduplication remains separate. Journal retention and an automatic drain of idle delivery backlogs are not implemented.
+Shutdown cancels delivery work, gathers task outcomes, and waits at most 5 seconds for in-flight delivery persistence. It then stops waiting and leaves the on-disk row as it is; queued or pending rows are retried on the next start. A filesystem operation running in a thread cannot be forcibly cancelled by asyncio and may outlive this budget. Configure `TimeoutStopSec=15` in the resident service unit's `[Service]` section: a filesystem stuck below the application is ended by the service manager's stop timeout. Keep the normal service-manager termination of the entire service process group enabled before allowing a restart.
+
+Acknowledged stream IDs can be reported again on replay, and ambiguous responses can cause repeat POSTs; service idempotency is required. Trading deduplication remains separate. Delivery-file retention and an automatic drain of idle delivery backlogs are not implemented.
 
 From this directory:
 
@@ -58,19 +60,19 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 | `binance_ticker_url` | Public price-ticker endpoint. |
 | `binance_symbols` | Canonical asset to Binance symbol map; the example maps BTC, ETH and SOL. Missing mappings, including builder names, record null with `unmapped` and make no ticker request. |
 | `access_client_id`, `access_client_secret` | Access service-token credentials, attached only to coordinator requests. |
-| `signals_url` | Signals base URL for resident delivery reports; HTTPS with a hostname, no embedded credentials, query or fragment. Absence disables reporting. Only fake scenarios explicitly allow HTTP to loopback. Redirects are disabled. |
+| `signals_url` | Signals base URL for resident delivery reports; HTTPS with a hostname, no embedded credentials or raw `?` or `#` delimiters, including empty suffixes. The delivery route is built from parsed components. Absence disables reporting. Only fake scenarios explicitly allow HTTP to loopback. Redirects are disabled. |
 | `subscriber_token_file` | Subscriber bearer-token file, read once at startup; exactly one nonempty line, with an optional final newline. Invalid files disable reporting without stopping recovery or trading. |
 | `signals_access_client_id` | Signals Access service-token client ID, attached only to delivery requests. |
 | `signals_access_client_secret` | Signals Access service-token client secret, attached only to delivery requests. |
 | `key_ref` | Policy's signing-key reference. |
 | `vault_address`, `account_address` | The same dedicated follower vault; equity, fills, positions and subscriptions use this account. |
 | `delegate_key_file` | Private ed25519 seed file. |
-| `record_path` | Append-only JSONL journal; its adjacent `.lock` file enforces one writer. |
+| `record_path` | Append-only trading JSONL journal; its adjacent `.lock` file enforces one resident writer. Delivery rows use `<record_path>.deliveries.jsonl` with a separate file lock. Protect both files. |
 | `control_socket` | Owner-only local Unix control socket used by the cancel CLI. |
 | `risk_fraction` | Fraction of equity risked across entry-to-stop distance. |
 | `leverage_cap` | Maximum entry notional divided by equity. |
 | `exit_band` | Fractional IOC price allowance beyond a stop/target or current mark. |
-| `request_timeout_seconds` | Shared request timeout override: coordinator default 120 seconds; delivery default 10 seconds. Delivery values must be finite and strictly positive; invalid values fall back to 10 seconds. No maximum is imposed on valid positive values. |
+| `request_timeout_seconds` | Shared request timeout override: coordinator default 120 seconds; delivery default 10 seconds. Delivery values must be finite, strictly positive and at most 30 seconds; all other values fall back to 10 seconds. |
 | `policy.epoch` | Expected live signer policy epoch. |
 | `policy.venues`, `policy.vault_address` | Allowed venues and required vault. |
 | `policy.expires_at` | Unix seconds at which orders, including reduce-only exits, cease to be allowed. |
@@ -118,7 +120,7 @@ After an ambiguous send, open orders, fills and account positions are reconciled
 | `desk_watcher.py` | Subscription acknowledgements, websocket reader and reconnect events. |
 | `desk_io.py` | Config validation, oracle observations and signal-side order adapter. |
 | `desk_signal_consumer.py` | Redis reader, cursor, control socket and service entry point. |
-| `desk_deliveries.py` | Resident-consumer delivery reports whose HTTP requests are never awaited by trading; pending state derived from the journal. |
+| `desk_deliveries.py` | Resident-consumer delivery reports; durable queue before cursor, background POSTs, pending state from the separate delivery file. |
 | `desk_record.py` | Synced journal, state, deduplication, budget, review and writer lock. |
 | `desk_keygen.py` | Exclusive private seed creation and public-key output. |
 | `desk_scenarios.py` | Required scenario orchestration and execution assertions. |
@@ -128,6 +130,7 @@ After an ambiguous send, open orders, fills and account positions are reconciled
 | `desk_scenarios_redis.py` | Throwaway Redis process, ACL and restart scenarios. |
 | `desk_scenarios_deliveries.py` | Fake Signals service scenarios for reports, retries, recovery and credential handling. |
 | `desk_scenarios_delivery_safety.py` | Delivery configuration, persistence ordering, shutdown, backoff and task supervision regressions. |
+| `desk_scenarios_delivery_persistence.py` | Separate file locks, shutdown budget, real response decoding, timeout ceiling and empty URL delimiter regressions. |
 
 The missing-asset reason is `asset_not_allowed`, matching the signer. Local-only guards have their own explicit reasons.
 

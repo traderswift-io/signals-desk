@@ -2,18 +2,19 @@ import asyncio
 import math
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
-from .desk_record import append_record, delivery_state, now_ms
+from .desk_record import append_record, delivery_path, delivery_state, now_ms
 
 
 def delivery_headers(config, allow_http):
     endpoint = urlsplit(config['signals_url'])
     local = allow_http and endpoint.scheme == 'http' and endpoint.hostname == '127.0.0.1'
     if (not endpoint.hostname or endpoint.username is not None or endpoint.password is not None
-            or endpoint.fragment or endpoint.query or not (endpoint.scheme == 'https' or local)):
+            or '?' in config['signals_url'] or '#' in config['signals_url']
+            or not (endpoint.scheme == 'https' or local)):
         raise ValueError('invalid_signals_url')
     if endpoint.port is not None and endpoint.port < 1:
         raise ValueError('invalid_signals_url')
@@ -29,16 +30,15 @@ def delivery_headers(config, allow_http):
     return headers
 
 
-async def write_delivery(runtime, event, **values):
+def delivery_route(config):
+    endpoint = urlsplit(config['signals_url'])
+    return urlunsplit((endpoint.scheme, endpoint.netloc, endpoint.path.rstrip('/') + '/v1/deliveries', '', ''))
+
+
+async def persist_delivery(runtime, event, values):
     state = runtime['deliveries']
     async with state['writes']:
-        task = asyncio.create_task(asyncio.to_thread(append_record, runtime['config']['record_path'], event, **values))
-        cancelled = False
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-            await task
+        await asyncio.to_thread(append_record, delivery_path(runtime['config']), event, **values)
         event_id = values.get('event_id')
         if event == 'delivery_pending':
             state['pending'][event_id] = values
@@ -48,19 +48,32 @@ async def write_delivery(runtime, event, **values):
                 state['abandoned'].add(event_id)
         if values.get('status') == 429:
             state['not_before'] = max(state['not_before'], values.get('not_before', 0))
-        if cancelled:
-            raise asyncio.CancelledError
+
+
+async def write_delivery(runtime, event, **values):
+    state = runtime['deliveries']
+    task = asyncio.create_task(persist_delivery(runtime, event, values))
+    state['persistence'].add(task)
+
+    def persisted(done):
+        state['persistence'].discard(done)
+        if not done.cancelled() and done.exception() is not None:
+            asyncio.get_running_loop().call_exception_handler({'message': 'delivery_persistence_failed'})
+
+    task.add_done_callback(persisted)
+    await asyncio.shield(task)
 
 
 async def prepare_deliveries(runtime):
     if 'deliveries' in runtime or 'signals_url' not in runtime['config']:
         return
-    state = {'enabled': False, 'tasks': set(), 'worker': None, 'writes': asyncio.Lock(),
+    state = {'enabled': False, 'tasks': set(), 'persistence': set(), 'worker': None, 'writes': asyncio.Lock(),
              'pending': {}, 'abandoned': set(), 'not_before': 0, 'requested': False, 'fresh': None, 'stopping': False}
     runtime['deliveries'] = state
     try:
         state['headers'] = await asyncio.to_thread(delivery_headers, runtime['config'],
                                                    runtime.get('allow_http_deliveries', False))
+        state['url'] = delivery_route(runtime['config'])
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         await write_delivery(runtime, 'deliveries_disabled', reason=type(error).__name__)
         return
@@ -71,7 +84,7 @@ async def prepare_deliveries(runtime):
 def request_timeout(config):
     try:
         seconds = float(config.get('request_timeout_seconds', 10))
-        if math.isfinite(seconds) and seconds > 0:
+        if math.isfinite(seconds) and 0 < seconds <= 30:
             return seconds
     except (ValueError, TypeError, OverflowError):
         pass
@@ -104,7 +117,7 @@ async def post_delivery(runtime, row):
     values = {name: row[name] for name in ('signal_id', 'event_id')}
     status, not_before, recorded = 'transport_error', 0, False
     try:
-        async with runtime['session'].post(config['signals_url'].rstrip('/') + '/v1/deliveries',
+        async with runtime['session'].post(state['url'],
                 json=values, headers=state['headers'], allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=request_timeout(config))) as response:
             status = response.status
@@ -115,7 +128,7 @@ async def post_delivery(runtime, row):
                 recorded = isinstance(body, dict) and body.get('recorded') is True
     except TimeoutError:
         status = 'timeout'
-    except (aiohttp.ClientError, ValueError, TypeError):
+    except Exception:
         pass
     if recorded:
         await write_delivery(runtime, 'delivery_reported', **values)
@@ -192,8 +205,13 @@ def schedule_delivery(runtime, event_id=None):
 async def finish_deliveries(runtime):
     state = runtime.get('deliveries', {})
     state.update(stopping=True, requested=False)
-    worker = state.get('worker')
-    if worker is not None and not worker.done():
-        worker.cancel()
-    while state.get('tasks'):
-        await asyncio.gather(*tuple(state['tasks']), return_exceptions=True)
+    deadline = asyncio.get_running_loop().time() + 5
+    for task in tuple(state.get('tasks', ())):
+        task.cancel()
+    while state.get('tasks') or state.get('persistence'):
+        tasks = state.get('tasks', set()) | state.get('persistence', set())
+        remaining = max(0, deadline - asyncio.get_running_loop().time())
+        done, pending = await asyncio.wait(tasks, timeout=remaining)
+        await asyncio.gather(*done, return_exceptions=True)
+        if pending:
+            return

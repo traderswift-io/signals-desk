@@ -4,7 +4,7 @@ The TraderSwift demo desk uses five skills, one per bot. Install each complete `
 
 | Bot | Skill | Responsibility |
 | --- | --- | --- |
-| Desk Lead | [signals-desk-intake](signals-desk-intake/SKILL.md) | Read the private signal service, acknowledge delivery and route unchanged envelopes. |
+| Desk Lead | [signals-desk-intake](signals-desk-intake/SKILL.md) | Read the private signal service and route unchanged envelopes; the service records its GET. |
 | Position Sizer | [signals-position-sizing](signals-position-sizing/SKILL.md) | Report shared sizing results or refusals. |
 | Risk Gate | [signals-risk-gate](signals-risk-gate/SKILL.md) | Report the local policy check and unsigned intent preview. |
 | Executor | [signals-execution](signals-execution/SKILL.md) | Generate its delegate key, execute eligible intents and cancel through the shared client. |
