@@ -2,7 +2,7 @@
 
 This guide documents the **TraderSwift demo desk** in Grok: five bots in a private Trading Floor, five role skills, two service credentials and three routines scheduled in UTC. The Signals service is private; obtain a subscriber token from the signal publisher. Setup generates the Executor's delegate key and places no orders.
 
-This guide is for the `signer` branch; `main` mirrors upstream unchanged. A `traderswift` branch is coming and is not yet published. Use a reviewed checkout of this fork and record its commit. The current release does not support resting stop orders for routine-driven bots, so their new entries remain disabled.
+This guide is for the `signer` branch; `main` mirrors upstream unchanged. The `traderswift` branch is the same desk plus chain verification of each signal; its SETUP.md covers the extra config. Use a reviewed checkout of this fork and record its commit. The current release does not support resting stop orders for routine-driven bots, so their new entries remain disabled.
 
 ## 1. Prepare the bot workspaces
 
