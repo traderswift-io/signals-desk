@@ -20,7 +20,7 @@ The UTC routine scheduled 15 minutes before each Tokyo, London and New York open
 
 ## Pre-send checklist
 
-The service address `<signals-service-url>` and `<signals-subscriber-token>` come from the secret store. If the service is unavailable, read nothing and idle; there is no public-feed fallback. The service is private; obtain the subscriber token from the signal publisher. This branch requires hub verification and makes no chain writes.
+The service address `<signals-service-url>` and `<signals-subscriber-token>` come from the secret store. If the service is unavailable, read nothing and idle; there is no public-feed fallback. The service is private; obtain the subscriber token from the signal publisher. This branch requires chain verification and makes no chain writes.
 
 Before posting a ticket or handing an unchanged envelope to the Position Sizer, run three reads for that signal in the routine, in this order, stopping at the first refusal. The public chain base accepts GET only at 60 requests per minute per IP. Use the pinned `provider_id` from config for `<provider_id>` in both paths and the envelope's `signal_id` for `<signal_id>`:
 
@@ -30,7 +30,7 @@ Before posting a ticket or handing an unchanged envelope to the Position Sizer, 
 
 Today `charter/signals` answers 404, so every signal is refused `charter_missing`; this is the expected fail-closed result.
 
-No hub verification function exists in `desk/` in this version. Run these checks with the bot's existing commands; do not invent a desk command or substitute ordinary JSON serialization for JCS. Missing verification capability blocks processing. Everything after the Desk Lead remains unchanged.
+No chain verification function exists in `desk/` in this version. Run these checks with the bot's existing commands; do not invent a desk command or substitute ordinary JSON serialization for JCS. Missing verification capability blocks processing. Everything after the Desk Lead remains unchanged.
 
 The Signer policy is the approval; no chat approval phrase is required. Use only the configured vault and preserve the envelope and identifiers. This seat never sends an exchange action.
 
@@ -44,13 +44,13 @@ This skill runs exactly:
 - `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`
 - `POST /v1/deliveries {signal_id, event_id}`
 
-Read the private Signals service on the UTC schedule before the Tokyo, London and New York opens using the subscriber token supplied by the signal publisher and stored in the secret store. For every signal read, report delivery with `POST /v1/deliveries {signal_id, event_id}` using the identifiers returned by the service. After hub verification passes, post each publication as a Trading Floor ticket and save its unchanged envelope as `<envelope.json>` for the Position Sizer. Assets outside policy are posted as "published, not traded in the demo" and are not routed to execution.
+Read the private Signals service on the UTC schedule before the Tokyo, London and New York opens using the subscriber token supplied by the signal publisher and stored in the secret store. For every signal read, report delivery with `POST /v1/deliveries {signal_id, event_id}` using the identifiers returned by the service. After chain verification passes, post each publication as a Trading Floor ticket and save its unchanged envelope as `<envelope.json>` for the Position Sizer. Assets outside policy are posted as "published, not traded in the demo" and are not routed to execution.
 
 Report the command's printed numbers, never your own arithmetic. Quote service fields as returned. No separate sizer, policy implementation, delegate client or hand-built exchange request.
 
 ## Unknown results
 
-A failed read means no ticket. If the anchor is not there yet, keep the unchanged envelope pending and wait for the next routine; no retry loop. An unavailable or rate-limited hub, missing or ambiguous verification, a hash or publisher mismatch, or any anchor, provider or charter veto blocks ticket posting, handoff and downstream action. Report the reason and wait for the next routine before another hub read. A delivery acknowledgement does not prove hub verification; there is no trust-the-service fallback. A failed delivery report remains pending with its original signal_id and event_id; report the failure and never claim it was acknowledged.
+A failed read means no ticket. If the anchor is not there yet, keep the unchanged envelope pending and wait for the next routine; no retry loop. An unavailable or rate-limited chain endpoint, missing or ambiguous verification, a hash or publisher mismatch, or any anchor, provider or charter veto blocks ticket posting, handoff and downstream action. Report the reason and wait for the next routine before another chain read. A delivery acknowledgement does not prove chain verification; there is no trust-the-service fallback. A failed delivery report remains pending with its original signal_id and event_id; report the failure and never claim it was acknowledged.
 
 ## Reconciliation
 

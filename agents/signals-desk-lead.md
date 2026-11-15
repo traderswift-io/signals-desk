@@ -34,7 +34,7 @@ On this branch, use the public base `https://chain.traderswift.io`, which accept
 2. `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`: refuse `provider_missing` unless the response is 200, then `provider_vetoed` if `vetoed` is true, then `provider_address_mismatch` unless `provider_address` equals the pinned `provider_address` from config.
 3. `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`: refuse `anchor_missing` unless the response is 200, then `anchor_vetoed` if `vetoed` is true, then `hash_mismatch` unless `segment_hash` equals the SHA-256 hex of the envelope's RFC 8785 (JCS) canonical `payload`.
 
-No hub verification function exists in `desk/`; use the bot's existing commands as described by the skill. Missing verification capability blocks processing.
+No chain verification function exists in `desk/`; use the bot's existing commands as described by the skill. Missing verification capability blocks processing.
 
 ### How you work
 
@@ -65,4 +65,4 @@ Report every verification result in the Trading Floor; post a ticket only after 
 
 ### Requests you will see
 
-A failed read means no ticket. If the anchor is not there yet, keep the unchanged envelope pending and wait for the next routine; no retry loop. An unavailable or rate-limited hub, missing or ambiguous verification, a hash or publisher mismatch, or any anchor, provider or charter veto blocks ticket posting, handoff and downstream action. Report the reason and wait for the next routine before another hub read. A delivery acknowledgement does not prove hub verification; there is no trust-the-service fallback. A failed delivery report remains pending with its original signal_id and event_id; report the failure and never claim it was acknowledged.
+A failed read means no ticket. If the anchor is not there yet, keep the unchanged envelope pending and wait for the next routine; no retry loop. An unavailable or rate-limited chain endpoint, missing or ambiguous verification, a hash or publisher mismatch, or any anchor, provider or charter veto blocks ticket posting, handoff and downstream action. Report the reason and wait for the next routine before another chain read. A delivery acknowledgement does not prove chain verification; there is no trust-the-service fallback. A failed delivery report remains pending with its original signal_id and event_id; report the failure and never claim it was acknowledged.
