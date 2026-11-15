@@ -61,7 +61,7 @@ London changes on the last Sunday in March and October; New York changes on the 
 
 ## 6. Generate the Executor delegate and register its policy
 
-Prepare private `desk/config.json` from [desk/config.example.json](desk/config.example.json) as described in the execution skill. Replace all placeholders, use `<ACCOUNT_ADDRESS>` consistently for `account_address`, `vault_address` and `policy.vault_address`, and set mode 0600. Routine-driven workspaces must set `resident: false` and `stop_mode: software`; the example's resident default is for the continuously running service. Protect the key, journal and control socket directories with owner-only permissions. Set `provider_id` and `provider_address` to the signal publisher's provider id and chain address, as given by the publisher; the Desk Lead and intake skill refuse a signal whose chain record does not match them.
+Prepare private `desk/config.json` from [desk/config.example.json](desk/config.example.json) as described in the execution skill. Replace all placeholders, use `<ACCOUNT_ADDRESS>` consistently for `account_address`, `vault_address` and `policy.vault_address`, and set mode 0600. Routine-driven workspaces must set `resident: false` and `stop_mode: software`; the example's resident default is for the continuously running service. Protect the key, journal and control socket directories with owner-only permissions. Set `chain_url` to `https://chain.traderswift.io`, and `provider_id` and `provider_address` to the signal publisher's provider id and chain address, as given by the publisher; the Desk Lead and intake skill refuse a signal whose chain record does not match them.
 
 In the Executor's persistent workspace, run once from the checkout root:
 

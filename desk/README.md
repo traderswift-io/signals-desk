@@ -18,6 +18,7 @@ python3 -m desk.desk_executor --config desk/config.json cancel SIGNAL_ID
 python3 -m desk.desk_ticket --config desk/config.json size signal.json
 python3 -m desk.desk_ticket --config desk/config.json gate signal.json
 python3 -m desk.desk_ticket --config desk/config.json review SIGNAL_ID
+python3 -m desk.desk_anchor_verify desk/config.json envelope.json
 ```
 
 The default executor config path is `desk/config.json`, so `python3 -m desk.desk_executor cancel SIGNAL_ID` also works. Key generation runs once on the executor machine, prints only the public key, creates the seed file with mode 600, and refuses to replace any existing destination. Protect the config, record directory, and local control socket directory with owner-only permissions. Config, key, record, and socket paths are operator-supplied; relative paths resolve from the working directory.
@@ -108,11 +109,13 @@ After an ambiguous send, open orders, fills and account positions are reconciled
 | `desk_signal_consumer.py` | Redis reader, cursor, control socket and service entry point. |
 | `desk_record.py` | Synced journal, state, deduplication, budget, review and writer lock. |
 | `desk_keygen.py` | Exclusive private seed creation and public-key output. |
+| `desk_anchor_verify.py` | Chain reads (charter, provider, anchor) and JCS payload hash check before intake hands a signal on; prints one `VERIFY` line. |
 | `desk_scenarios.py` | Required scenario orchestration and execution assertions. |
 | `desk_scenarios_checks.py` | Pure financial, policy, source-tree and named timer checks. |
 | `desk_scenarios_execution.py` | Trade bursts, price precision, oracle failures, mapping and exit latency regressions. |
 | `desk_scenarios_fakes.py` | Local fake coordinator, Info, ticker and websocket. |
 | `desk_scenarios_redis.py` | Throwaway Redis process, ACL and restart scenarios. |
+| `desk_scenarios_anchor.py` | Anchor verification against a local fake chain: every refusal and the pass path. |
 
 The missing-asset reason is `asset_not_allowed`, matching the signer. Local-only guards have their own explicit reasons.
 
