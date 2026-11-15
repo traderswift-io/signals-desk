@@ -33,7 +33,7 @@ async def consume(runtime, client, maximum_entries=None):
                     if any(name not in fields for name in required):
                         raise ValueError('incomplete_stream_entry')
                     timestamp = int(fields['ts'])
-                    if timestamp < 0 or not isinstance(fields['event_id'], str) or not fields['event_id']:
+                    if timestamp < 0:
                         raise ValueError('invalid_stream_event')
                     envelope = json.loads(fields['envelope'])
                     if not isinstance(envelope, dict):
@@ -47,7 +47,7 @@ async def consume(runtime, client, maximum_entries=None):
                         raise ValueError('stream_kind_mismatch')
                     result = await submit(runtime, envelope)
                     append_record(config['record_path'], 'consumed', stream_id=entry_id, result=result)
-                    schedule_delivery(runtime, fields['signal_id'], fields['event_id'], timestamp)
+                    schedule_delivery(runtime, fields['signal_id'], entry_id, timestamp)
                 except (ValueError, KeyError, TypeError) as error:
                     append_record(config['record_path'], 'stream_refusal', stream_id=entry_id, reason=str(error))
                     schedule_delivery(runtime)

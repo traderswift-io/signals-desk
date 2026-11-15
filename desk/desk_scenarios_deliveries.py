@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,8 +20,12 @@ from .desk_signal_consumer import consume
 
 async def deliveries(request):
     state = request.app['state']
-    state['posts'].append({'body': await request.json(), 'headers': dict(request.headers)})
+    body = await request.json()
+    state['posts'].append({'body': body, 'headers': dict(request.headers)})
     state['arrived'].set()
+    event_id = body.get('event_id')
+    if not isinstance(event_id, str) or re.fullmatch(r'\d+-\d+', event_id) is None:
+        return web.json_response({'recorded': False}, status=404)
     if state['hold']:
         await state['release'].wait()
     if state.get('raw') is not None:
@@ -67,12 +72,12 @@ def posted(state):
     return [post['body']['event_id'] for post in state['posts']]
 
 
-async def entry(runtime, signal_id, event_id=None, timestamp=None, asset='ETH', fields=None):
+async def entry(runtime, signal_id, event_id=None, timestamp=None, asset='ETH', fields=None, entry_id='1-0'):
     if fields is None:
         fields = stream_fields(signal_envelope(signal_id, asset))
-        fields['event_id'] = event_id or 'event-' + signal_id
+        fields['event_id'] = 'event-' + signal_id if event_id is None else event_id
         fields['ts'] = str(now_ms() if timestamp is None else timestamp)
-    client = SimpleNamespace(xread=AsyncMock(return_value=[('signals', [('1-0', fields)])]))
+    client = SimpleNamespace(xread=AsyncMock(return_value=[('signals', [(entry_id, fields)])]))
     await consume(runtime, client, 1)
 
 
@@ -82,16 +87,16 @@ async def check_success():
         await finish_deliveries(runtime)
         assert len(state['posts']) == 1
         post = state['posts'][0]
-        assert post['body'] == {'signal_id': 'first', 'event_id': 'event-first'}
+        assert post['body'] == {'signal_id': 'first', 'event_id': '1-0'}
         assert post['headers']['Authorization'] == 'Bearer fake-subscriber-token'
         assert post['headers']['CF-Access-Client-Id'] == 'fake-signals-id'
         assert post['headers']['CF-Access-Client-Secret'] == 'fake-signals-secret'
-        assert [row['event_id'] for row in rows(runtime, 'delivery_reported')] == ['event-first']
+        assert [row['event_id'] for row in rows(runtime, 'delivery_reported')] == ['1-0']
         assert not pending_deliveries(runtime['config'])
         Path(runtime['config']['subscriber_token_file']).unlink()
-        await entry(runtime, 'first', asset='BTC')
+        await entry(runtime, 'first', event_id='', asset='BTC')
         await finish_deliveries(runtime)
-        assert posted(state) == ['event-first', 'event-first']
+        assert posted(state) == ['1-0', '1-0']
         assert rows(runtime, 'consumed')[-1]['result'] == {'refused': 'already_acted'}
         assert len(trading['intents']) == 1
         assert state['posts'][-1]['headers']['Authorization'] == 'Bearer fake-subscriber-token'
@@ -104,19 +109,19 @@ async def check_unavailable():
         await finish_deliveries(runtime)
         assert pending_deliveries(runtime['config'])[0]['status'] == 503
         state['status'] = 200
-        await entry(runtime, 'second')
+        await entry(runtime, 'second', entry_id='2-0')
         await finish_deliveries(runtime)
-        assert posted(state) == ['event-first', 'event-first', 'event-second']
-        assert [row['event_id'] for row in rows(runtime, 'delivery_reported')] == ['event-first', 'event-second']
+        assert posted(state) == ['1-0', '1-0', '2-0']
+        assert [row['event_id'] for row in rows(runtime, 'delivery_reported')] == ['1-0', '2-0']
         assert not pending_deliveries(runtime['config'])
         for index in range(12):
             append_record(runtime['config']['record_path'], 'delivery_pending', signal_id='older',
-                          event_id=f'older-{index}', status=503)
-        append_record(runtime['config']['record_path'], 'delivery_pending', signal_id='older', event_id='older-0', status=503)
-        await entry(runtime, 'third')
+                          event_id=f'0-{index}', status=503)
+        append_record(runtime['config']['record_path'], 'delivery_pending', signal_id='older', event_id='0-0', status=503)
+        await entry(runtime, 'third', entry_id='3-0')
         await finish_deliveries(runtime)
-        assert posted(state)[3:] == [f'older-{index}' for index in range(10)] + ['event-third']
-        assert [row['event_id'] for row in pending_deliveries(runtime['config'])] == ['older-10', 'older-11']
+        assert posted(state)[3:] == [f'0-{index}' for index in range(10)] + ['3-0']
+        assert [row['event_id'] for row in pending_deliveries(runtime['config'])] == ['0-10', '0-11']
 
 
 async def check_rate_limit():
@@ -128,12 +133,12 @@ async def check_rate_limit():
         pending = pending_deliveries(runtime['config'])
         assert pending[0]['status'] == 429 and pending[0]['not_before'] == timestamp + 30000
         state.update(status=200, headers={})
-        await entry(runtime, 'inside', timestamp=timestamp + 10000)
+        await entry(runtime, 'inside', timestamp=timestamp + 10000, entry_id='2-0')
         await finish_deliveries(runtime)
-        assert posted(state) == ['event-first', 'event-inside']
-        await entry(runtime, 'after', timestamp=timestamp + 30001)
+        assert posted(state) == ['1-0', '2-0']
+        await entry(runtime, 'after', timestamp=timestamp + 30001, entry_id='3-0')
         await finish_deliveries(runtime)
-        assert posted(state) == ['event-first', 'event-inside', 'event-first', 'event-after']
+        assert posted(state) == ['1-0', '2-0', '1-0', '3-0']
         assert not pending_deliveries(runtime['config'])
 
 
@@ -162,13 +167,13 @@ async def check_restart():
         prepare_deliveries(restarted)
         restarted['worker'] = asyncio.create_task(event_worker(restarted))
         try:
-            assert pending_deliveries(restarted['config'])[0]['event_id'] == 'event-first'
+            assert pending_deliveries(restarted['config'])[0]['event_id'] == '1-0'
             state['status'] = 200
             await recover(restarted)
-            assert trading['position'] == 0 and posted(state) == ['event-first']
+            assert trading['position'] == 0 and posted(state) == ['1-0']
             schedule_delivery(restarted)
             await finish_deliveries(restarted)
-            assert posted(state) == ['event-first', 'event-first']
+            assert posted(state) == ['1-0', '1-0']
             assert not pending_deliveries(restarted['config'])
             assert len([intent for intent in trading['intents'] if not intent.get('reduce_only', True)]) == 1
         finally:
@@ -181,7 +186,7 @@ async def check_malformed():
         valid = stream_fields(signal_envelope('broken'))
         broken = [{}, {**valid, 'envelope': '{'}, {**valid, 'envelope': 'null'},
                   {**valid, 'correlation_id': 'different'}, {**valid, 'kind': 'unknown'},
-                  {**valid, 'ts': 'invalid'}, {**valid, 'event_id': ''}]
+                  {**valid, 'ts': 'invalid'}, {**valid, 'ts': '-1'}]
         for fields in broken:
             await entry(runtime, 'broken', fields=fields)
         await finish_deliveries(runtime)
@@ -194,11 +199,11 @@ async def check_secrets():
         state['body'] = {'recorded': False, 'error': 'fake-subscriber-token fake-signals-id fake-signals-secret'}
         for status in (400, 401, 403, 500, 200):
             state['status'] = status
-            await entry(runtime, f'refused-{status}')
+            await entry(runtime, f'refused-{status}', entry_id=f'{status}-0')
             await finish_deliveries(runtime)
             assert pending_deliveries(runtime['config'])[-1]['status'] == status
         state.update(raw='fake-subscriber-token fake-signals-secret')
-        await entry(runtime, 'invalid-json')
+        await entry(runtime, 'invalid-json', entry_id='600-0')
         await finish_deliveries(runtime)
         assert not rows(runtime, 'delivery_reported')
         text = Path(runtime['config']['record_path']).read_text()
