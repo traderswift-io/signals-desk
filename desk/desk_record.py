@@ -102,9 +102,9 @@ def delivery_path(config):
     return config['record_path'] + '.deliveries.jsonl'
 
 
-def delivery_state(config):
+def delivery_state(config, records=None):
     pending, abandoned, not_before = {}, set(), 0
-    for row in read_records(delivery_path(config)):
+    for row in read_records(delivery_path(config)) if records is None else records:
         if row['event'] == 'delivery_pending':
             if row['event_id'] not in abandoned:
                 pending[row['event_id']] = row

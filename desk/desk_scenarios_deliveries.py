@@ -234,6 +234,7 @@ async def check_secrets():
 async def main():
     from .desk_scenarios_delivery_safety import check_safety
     from .desk_scenarios_delivery_persistence import check_persistence
+    from .desk_scenarios_delivery_recovery import check_recovery
 
     for name, check in [('1: body, headers, recorded and redelivery', check_success),
                         ('2: 503 pending, ordered retries and ten-report limit', check_unavailable),
@@ -246,6 +247,7 @@ async def main():
         print('PASS deliveries ' + name, flush=True)
     await check_safety()
     await check_persistence()
+    await check_recovery()
 
 
 if __name__ == '__main__':

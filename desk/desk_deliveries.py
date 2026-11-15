@@ -6,7 +6,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
-from .desk_record import append_record, delivery_path, delivery_state, now_ms
+from .desk_delivery_store import append_delivery_record as append_record, prepare_delivery_store as delivery_state
+from .desk_record import append_record as diagnostic_record, delivery_path, now_ms
 
 
 def delivery_headers(config, allow_http):
@@ -64,20 +65,45 @@ async def write_delivery(runtime, event, **values):
     await asyncio.shield(task)
 
 
+async def disable_store(runtime, error, reason=None):
+    if reason is None:
+        reason = 'delivery_store_unavailable' if isinstance(error, OSError) else 'delivery_store_corrupt'
+    try:
+        await asyncio.to_thread(diagnostic_record, runtime['config']['record_path'], 'deliveries_disabled',
+                                reason=reason, exception=type(error).__name__)
+    except Exception:
+        asyncio.get_running_loop().call_exception_handler({'message': 'deliveries_disabled_record_failed'})
+
+
 async def prepare_deliveries(runtime):
+    try:
+        await initialize_deliveries(runtime)
+    except Exception as error:
+        runtime.setdefault('deliveries', {})['enabled'] = False
+        await disable_store(runtime, error, reason=type(error).__name__)
+
+
+async def initialize_deliveries(runtime):
     if 'deliveries' in runtime or 'signals_url' not in runtime['config']:
         return
     state = {'enabled': False, 'tasks': set(), 'persistence': set(), 'worker': None, 'writes': asyncio.Lock(),
              'pending': {}, 'abandoned': set(), 'not_before': 0, 'requested': False, 'fresh': None, 'stopping': False}
     runtime['deliveries'] = state
     try:
+        pending, abandoned, not_before = await asyncio.to_thread(delivery_state, runtime['config'])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as error:
+        await disable_store(runtime, error)
+        return
+    try:
         state['headers'] = await asyncio.to_thread(delivery_headers, runtime['config'],
                                                    runtime.get('allow_http_deliveries', False))
         state['url'] = delivery_route(runtime['config'])
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
-        await write_delivery(runtime, 'deliveries_disabled', reason=type(error).__name__)
+        try:
+            await write_delivery(runtime, 'deliveries_disabled', reason=type(error).__name__)
+        except Exception as store_error:
+            await disable_store(runtime, store_error)
         return
-    pending, abandoned, not_before = await asyncio.to_thread(delivery_state, runtime['config'])
     state.update(pending=pending, abandoned=abandoned, not_before=not_before, enabled=True)
 
 
