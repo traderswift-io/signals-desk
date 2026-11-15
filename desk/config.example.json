@@ -1,5 +1,6 @@
 {
   "coordinator_url": "<coordinator-base-url>",
+  "chain_url": "https://chain.traderswift.io",
   "builder_dexs": ["xyz"],
   "resident": true,
   "stop_mode": "software",

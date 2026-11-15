@@ -22,7 +22,7 @@ The UTC routine scheduled 15 minutes before each Tokyo, London and New York open
 
 The service address `<signals-service-url>` and `<signals-subscriber-token>` come from the secret store. If the service is unavailable, read nothing and idle; there is no public-feed fallback. The service is private; obtain the subscriber token from the signal publisher. This branch requires chain verification and makes no chain writes.
 
-Before posting a ticket or handing an unchanged envelope to the Position Sizer, run three reads for that signal in the routine, in this order, stopping at the first refusal. The public chain base accepts GET only at 60 requests per minute per IP. Use the pinned `provider_id` from config for `<provider_id>` in both paths and the envelope's `signal_id` for `<signal_id>`:
+Before posting a ticket or handing an unchanged envelope to the Position Sizer, save the unchanged envelope as `<envelope.json>` and run `python3 -m desk.desk_anchor_verify desk/config.json <envelope.json>`. The command performs three reads for that signal in the routine, in this order, stopping at the first refusal. The public chain base accepts GET only at 60 requests per minute per IP. It uses the pinned `provider_id` from config for `<provider_id>` in both paths and the envelope payload's `signal_id` for `<signal_id>`:
 
 1. `GET https://chain.traderswift.io/network/v1/charter/signals`: refuse `charter_missing` unless the response is 200, then `charter_vetoed` if `vetoed` is true.
 2. `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`: refuse `provider_missing` unless the response is 200, then `provider_vetoed` if `vetoed` is true, then `provider_address_mismatch` unless `provider_address` equals the pinned `provider_address` from config.
@@ -30,7 +30,7 @@ Before posting a ticket or handing an unchanged envelope to the Position Sizer, 
 
 A 404 on the charter read refuses the signal `charter_missing`; until the `signals` subnet is chartered on the chain, every signal is refused this way, which is the expected fail-closed result.
 
-No chain verification function exists in `desk/` in this version. Run these checks with the bot's existing commands; do not invent a desk command or substitute ordinary JSON serialization for JCS. Missing verification capability blocks processing. Everything after the Desk Lead remains unchanged.
+Report the command's printed `VERIFY` line, never your own hash. The command recomputes the payload hash and never trusts an envelope or stream `segment_hash`. A noncanonical payload refuses `payload_not_canonical` before any read. A 429, connection failure or timeout refuses `chain_unavailable`; there is no retry or sleep. Missing verification capability blocks processing. Everything after the Desk Lead remains unchanged.
 
 The Signer policy is the approval; no chat approval phrase is required. Use only the configured vault and preserve the envelope and identifiers. This seat never sends an exchange action.
 
