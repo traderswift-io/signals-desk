@@ -54,7 +54,7 @@ def transport(replies, requests, seconds=2, paths=PATHS):
                                           request_info=info, traces=[], loop=asyncio.get_running_loop(), session=None)
         response.status = status
         response._headers = headers
-        response._body = body.encode('utf-8')
+        response._body = body if isinstance(body, bytes) else body.encode('utf-8')
         prepared.append(response)
 
     @asynccontextmanager

@@ -74,6 +74,35 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 
 Publication envelopes contain `payload` and adjacent `receipt`; version is 1. The reader accepts an explicit outer `version: 1` and the agreed v1 envelope without an explicit version. Signal payloads need identity, publisher, venue symbol (or symbol fallback), side, invalidation, confidence, numeric entry and stop, and a future Unix-millisecond `reply_by`. A cancel payload needs kind, signal id and publisher. Stream metadata must agree with the embedded identity and kind. Receipt anchoring is outside this implementation. Symbols match case-insensitively across the main and configured builder universes. No match refuses `symbol_unmapped`; multiple matches refuse `symbol_ambiguous`. Tickets store the exact meta name in `venue_symbol` and `asset`; order and cancel intents use that name and its venue asset index. Builder indices use the DEX slot returned by `perpDexs`, including empty slots. Policy cap asset names must use canonical meta spelling.
 
+## Anchor verifier protocol
+
+Run `python3 -m desk.desk_anchor_verify desk/config.json <envelope.json>` from the checkout root before ticket posting or handoff. Validation stops at the first refusal: fully parse and validate config before opening the envelope; parse the envelope and validate its identity; canonicalize and hash its payload; then read charter, provider (including its address pin), and anchor (including its hash). No chain writes, redirects, retries or sleeps occur.
+
+Config must be an object with `chain_url`, `provider_id` and `provider_address`. The base must use HTTPS with a host, an empty or `/` path, and no userinfo, query or fragment, including empty `?` or `#` suffixes. Whitespace, control characters, backslashes and malformed ports are refused; endpoint paths replace parsed URL components. Use `https://chain.traderswift.io`. The pinned address must be a nonempty string and is compared exactly, without trimming or case folding. Both provider and signal IDs must match `^[A-Za-z0-9._:-]{1,128}$` in full, excluding `.` and `..`. `request_timeout_seconds` defaults to 10 and must be a finite JSON number, not a boolean or string, with `0 < x <= 60`.
+
+Config, envelope and chain JSON reject duplicate object keys and bare `NaN`, `Infinity` and `-Infinity` at every depth. Unreadable files, malformed local JSON or file decoding, and input recursion failures yield `invalid_input`. The envelope and its `payload` must be objects with a valid string `payload.signal_id`, checked before canonicalization. Canonicalization supports objects with string keys sorted by UTF-16 code units, arrays, valid Unicode scalar strings, booleans, null and integers with absolute value at most 9007199254740991. All floats, unsupported payload values and unpaired surrogates in payload strings or keys yield `payload_not_canonical`; payload recursion yields `invalid_input`. Whitespace and key order are normalized without Unicode normalization. Escaped valid surrogate pairs decode to supported scalar strings. Unused local fields outside the payload are not recursively Unicode-validated.
+
+The three GET paths, relative to the configured base, are `/network/v1/charter/signals`, `/network/v1/provider/signals/<provider_id>`, and `/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`. Both provider path segments use the config pin; the signal segment uses the validated payload ID. Each response status is checked before its body: 429 or any status >=500 yields `chain_unavailable`; every other non-200, including redirects, yields that read's missing refusal. Only 200 bodies are decoded, with aiohttp JSON MIME checking (including `application/*+json`). Invalid JSON, duplicate keys, non-JSON constants, charset/text decoding errors, invalid Unicode scalar strings or keys at any depth, decoding/validation recursion, or a non-object body yields `chain_unavailable`. Chain numbers are not subject to the payload's restricted numeric subset. Only top-level fields are inspected for veto, address and hash; records are not unwrapped.
+
+The result is `pass` or exactly one of these twelve refusals. Each condition applies only after preceding checks have succeeded:
+
+| Refusal | Condition |
+| --- | --- |
+| `invalid_input` | Unreadable or malformed config/envelope file, duplicate keys, non-JSON constants, invalid config, or input/payload recursion. Config validation precedes envelope access. |
+| `invalid_envelope` | Envelope or payload is not an object, or `payload.signal_id` is missing or violates the ID grammar. |
+| `payload_not_canonical` | Payload contains a float, unsafe integer, unsupported type, non-string key or invalid Unicode after identity validation. |
+| `chain_unavailable` | Connection, TLS, timeout or other aiohttp client error; 429 or any status >=500; invalid 200 body/MIME/charset/Unicode as above; or recursion during chain processing. |
+| `charter_missing` | Charter status is non-200 and below 500, except 429. |
+| `charter_vetoed` | Decoded charter object's `vetoed` is missing or anything other than literal JSON `false`. |
+| `provider_missing` | Provider status is non-200 and below 500, except 429. |
+| `provider_vetoed` | Decoded provider object's `vetoed` is missing or anything other than literal JSON `false`. |
+| `provider_address_mismatch` | After provider veto checking, `provider_address` is absent, not a nonempty string, or not exactly equal to the config pin. |
+| `anchor_missing` | Anchor status is non-200 and below 500, except 429. |
+| `anchor_vetoed` | Decoded anchor object's `vetoed` is missing or anything other than literal JSON `false`. |
+| `hash_mismatch` | After anchor veto checking, `segment_hash` is absent or not exactly the lowercase SHA-256 hex of the canonical payload's UTF-8 bytes. |
+
+The CLI prints exactly two lines: JSON metadata with `signal_id` (validated ID or null) and `reads` (received HTTP statuses in order), then `VERIFY | <validated ID or -> | <result>`. Only the VERIFY line carries the result; no raw exception text is a result. Exit status is 0 only for `pass`, otherwise 1. A pass requires all three reads, each with literal `vetoed: false`, the exact provider address and exact recomputed payload hash. Envelope, receipt and stream hashes are ignored. Require both the printed pass and exit 0 before routing; anything else blocks processing. Missing anchors remain pending until the next routine.
+
 ## Execution and records
 
 Routine-driven bots cannot hold the software stop watcher. Their entries remain disabled until resting stop support is implemented: keep `resident: false` and `stop_mode: software` until that support ships. The `trigger` value reserves the configuration choice for that integration; selecting it does not implement a resting stop in this version. Cancel envelopes, cancel commands, reduce-only flattening, key generation and the refused-intent door check remain allowed. Resident software execution keeps its existing behavior. Reviewer records continue to identify the software stops actually implemented here.
@@ -118,6 +147,7 @@ After an ambiguous send, open orders, fills and account positions are reconciled
 | `desk_scenarios_fakes.py` | Local fake coordinator, Info, ticker and websocket. |
 | `desk_scenarios_redis.py` | Throwaway Redis process, ACL and restart scenarios. |
 | `desk_scenarios_anchor.py` | Mocked HTTPS transport with real aiohttp JSON decoding: transport self-check, pass, all twelve refusal names, address/config/ID validation, duplicate keys, safe output, timeout bounds, recursion, status/MIME precedence and restricted JCS fixtures. No live chain or TLS handshake is exercised. |
+| `desk_scenarios_anchor_decoding.py` | Real aiohttp charset failures, strict JSON constants across all sources, recursive chain Unicode validation and permitted chain numbers. |
 
 The missing-asset reason is `asset_not_allowed`, matching the signer. Local-only guards have their own explicit reasons.
 

@@ -32,8 +32,24 @@ def unique_object(pairs):
     return result
 
 
+def reject_constant(value):
+    raise ValueError('non_json_constant')
+
+
 def decode_json(text):
-    return json.loads(text, object_pairs_hook=unique_object)
+    return json.loads(text, object_pairs_hook=unique_object, parse_constant=reject_constant)
+
+
+def validate_unicode(value):
+    if isinstance(value, str):
+        value.encode('utf-8')
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            validate_unicode(key)
+            validate_unicode(item)
+    elif isinstance(value, list):
+        for item in value:
+            validate_unicode(item)
 
 
 def valid_id(value):
@@ -73,7 +89,8 @@ async def read_chain(session, base, path, kind, reads, timeout):
             if response.status != 200:
                 return None, kind + '_missing'
             body = await response.json(loads=decode_json)
-    except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, RecursionError):
+            validate_unicode(body)
+    except (aiohttp.ClientError, TimeoutError, ValueError, LookupError, TypeError, RecursionError):
         return None, 'chain_unavailable'
     if not isinstance(body, dict):
         return None, 'chain_unavailable'
