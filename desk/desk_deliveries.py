@@ -2,23 +2,80 @@ import asyncio
 import math
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 
-from .desk_record import append_record, now_ms, pending_deliveries
+from .desk_record import append_record, delivery_state, now_ms
 
 
-def prepare_deliveries(runtime):
-    if 'deliveries' in runtime or not runtime['config'].get('signals_url'):
-        return
-    config = runtime['config']
-    token = Path(config['subscriber_token_file']).read_text().strip()
-    if not token or '\n' in token or '\r' in token:
+def delivery_headers(config, allow_http):
+    endpoint = urlsplit(config['signals_url'])
+    local = allow_http and endpoint.scheme == 'http' and endpoint.hostname == '127.0.0.1'
+    if (not endpoint.hostname or endpoint.username is not None or endpoint.password is not None
+            or endpoint.fragment or endpoint.query or not (endpoint.scheme == 'https' or local)):
+        raise ValueError('invalid_signals_url')
+    if endpoint.port is not None and endpoint.port < 1:
+        raise ValueError('invalid_signals_url')
+    token = Path(config['subscriber_token_file']).read_text().splitlines()
+    if len(token) != 1 or not token[0].strip():
         raise ValueError('invalid_subscriber_token')
-    runtime['deliveries'] = {'lock': asyncio.Lock(), 'tasks': set(), 'headers': {
-        'Authorization': 'Bearer ' + token,
-        'CF-Access-Client-Id': config['signals_access_client_id'],
-        'CF-Access-Client-Secret': config['signals_access_client_secret']}}
+    headers = {'Authorization': 'Bearer ' + token[0].strip(),
+               'CF-Access-Client-Id': config['signals_access_client_id'],
+               'CF-Access-Client-Secret': config['signals_access_client_secret']}
+    if any(not isinstance(value, str) or not value.strip() or '\r' in value or '\n' in value
+           for value in headers.values()):
+        raise ValueError('invalid_delivery_credentials')
+    return headers
+
+
+async def write_delivery(runtime, event, **values):
+    state = runtime['deliveries']
+    async with state['writes']:
+        task = asyncio.create_task(asyncio.to_thread(append_record, runtime['config']['record_path'], event, **values))
+        cancelled = False
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+            await task
+        event_id = values.get('event_id')
+        if event == 'delivery_pending':
+            state['pending'][event_id] = values
+        elif event in ('delivery_reported', 'delivery_abandoned'):
+            state['pending'].pop(event_id, None)
+            if event == 'delivery_abandoned':
+                state['abandoned'].add(event_id)
+        if values.get('status') == 429:
+            state['not_before'] = max(state['not_before'], values.get('not_before', 0))
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+async def prepare_deliveries(runtime):
+    if 'deliveries' in runtime or 'signals_url' not in runtime['config']:
+        return
+    state = {'enabled': False, 'tasks': set(), 'worker': None, 'writes': asyncio.Lock(),
+             'pending': {}, 'abandoned': set(), 'not_before': 0, 'requested': False, 'fresh': None, 'stopping': False}
+    runtime['deliveries'] = state
+    try:
+        state['headers'] = await asyncio.to_thread(delivery_headers, runtime['config'],
+                                                   runtime.get('allow_http_deliveries', False))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+        await write_delivery(runtime, 'deliveries_disabled', reason=type(error).__name__)
+        return
+    pending, abandoned, not_before = await asyncio.to_thread(delivery_state, runtime['config'])
+    state.update(pending=pending, abandoned=abandoned, not_before=not_before, enabled=True)
+
+
+def request_timeout(config):
+    try:
+        seconds = float(config.get('request_timeout_seconds', 10))
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return 10
 
 
 def retry_time(value, timestamp):
@@ -34,56 +91,109 @@ def retry_time(value, timestamp):
         return timestamp
 
 
-async def post_delivery(runtime, signal_id, event_id, timestamp):
-    config = runtime['config']
-    values = {'signal_id': signal_id, 'event_id': event_id}
-    status, not_before = 'transport_error', None
-    append_record(config['record_path'], 'delivery_pending', **values, status='sending')
+async def queue_delivery(runtime, signal_id, event_id):
+    state = runtime.get('deliveries', {})
+    if not state.get('enabled') or event_id in state['pending'] or event_id in state['abandoned']:
+        return
+    await write_delivery(runtime, 'delivery_pending', signal_id=signal_id, event_id=event_id,
+                         status='queued', attempts=0, next_attempt=0)
+
+
+async def post_delivery(runtime, row):
+    config, state = runtime['config'], runtime['deliveries']
+    values = {name: row[name] for name in ('signal_id', 'event_id')}
+    status, not_before, recorded = 'transport_error', 0, False
     try:
         async with runtime['session'].post(config['signals_url'].rstrip('/') + '/v1/deliveries',
-                json=values, headers=runtime['deliveries']['headers'], allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=float(config.get('request_timeout_seconds', 10)))) as response:
+                json=values, headers=state['headers'], allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=request_timeout(config))) as response:
             status = response.status
             if status == 429:
-                not_before = retry_time(response.headers.get('Retry-After'), timestamp)
+                not_before = retry_time(response.headers.get('Retry-After'), now_ms())
             if 200 <= status < 300:
                 body = await response.json()
-                if isinstance(body, dict) and body.get('recorded') is True:
-                    append_record(config['record_path'], 'delivery_reported', **values)
-                    return
+                recorded = isinstance(body, dict) and body.get('recorded') is True
     except TimeoutError:
         status = 'timeout'
     except (aiohttp.ClientError, ValueError, TypeError):
         pass
-    except asyncio.CancelledError:
-        append_record(config['record_path'], 'delivery_pending', **values, status='cancelled')
-        raise
-    if not_before is not None:
-        values['not_before'] = not_before
-    append_record(config['record_path'], 'delivery_pending', **values, status=status)
+    if recorded:
+        await write_delivery(runtime, 'delivery_reported', **values)
+        return status
+    attempts = row.get('attempts', 0) + 1
+    next_attempt = max(not_before, now_ms() + min(5000 * 2 ** min(attempts - 1, 8), 900000))
+    event = 'delivery_abandoned' if attempts >= 20 else 'delivery_pending'
+    await write_delivery(runtime, event, **values, status=status, attempts=attempts,
+                         next_attempt=next_attempt, not_before=next_attempt if status == 429 else not_before)
+    return status
 
 
-async def report_delivery(runtime, signal_id, event_id, timestamp=None):
-    timestamp = now_ms() if timestamp is None else timestamp
-    async with runtime['deliveries']['lock']:
-        pending = pending_deliveries(runtime['config'])
-        eligible = [row for row in pending if row.get('not_before', 0) <= timestamp][:10]
-        for row in eligible:
-            await post_delivery(runtime, row['signal_id'], row['event_id'], timestamp)
-        current = next((row for row in pending if row['event_id'] == event_id), {})
-        if event_id is not None and not current:
-            await post_delivery(runtime, signal_id, event_id, timestamp)
-
-
-def schedule_delivery(runtime, signal_id=None, event_id=None, timestamp=None):
-    if 'deliveries' not in runtime:
+async def report_delivery(runtime, fresh):
+    state = runtime['deliveries']
+    if state['not_before'] > now_ms():
         return
-    tasks = runtime['deliveries']['tasks']
-    task = asyncio.create_task(report_delivery(runtime, signal_id, event_id, timestamp))
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
+    eligible = [row for key, row in state['pending'].items() if key != fresh
+                and max(row.get('next_attempt', 0), row.get('not_before', 0)) <= now_ms()][:10]
+    for row in eligible:
+        if max(row.get('next_attempt', 0), row.get('not_before', 0)) > now_ms():
+            continue
+        if await post_delivery(runtime, row) == 429:
+            return
+    row = state['pending'].get(fresh)
+    if row and max(row.get('next_attempt', 0), row.get('not_before', 0)) <= now_ms():
+        await post_delivery(runtime, row)
+
+
+async def delivery_worker(runtime):
+    state = runtime['deliveries']
+    while state['requested']:
+        fresh = state['fresh']
+        state.update(requested=False, fresh=None)
+        await report_delivery(runtime, fresh)
+
+
+def delivery_done(runtime, task):
+    state = runtime['deliveries']
+    state['tasks'].discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is None:
+        if state['requested']:
+            schedule_delivery(runtime)
+        return
+    recording = asyncio.create_task(write_delivery(runtime, 'delivery_error', reason=type(error).__name__))
+    state['tasks'].add(recording)
+
+    def recorded(done):
+        state['tasks'].discard(done)
+        if not done.cancelled() and done.exception() is not None:
+            asyncio.get_running_loop().call_exception_handler({'message': 'delivery_error_record_failed'})
+        if state['requested']:
+            schedule_delivery(runtime)
+
+    recording.add_done_callback(recorded)
+
+
+def schedule_delivery(runtime, event_id=None):
+    state = runtime.get('deliveries', {})
+    if not state.get('enabled') or state['stopping']:
+        return
+    state['requested'] = True
+    if event_id is not None:
+        state['fresh'] = event_id
+    if not state['tasks']:
+        task = asyncio.create_task(delivery_worker(runtime))
+        state['worker'] = task
+        state['tasks'].add(task)
+        task.add_done_callback(lambda done: delivery_done(runtime, done))
 
 
 async def finish_deliveries(runtime):
-    if 'deliveries' in runtime:
-        await asyncio.gather(*tuple(runtime['deliveries']['tasks']))
+    state = runtime.get('deliveries', {})
+    state.update(stopping=True, requested=False)
+    worker = state.get('worker')
+    if worker is not None and not worker.done():
+        worker.cancel()
+    while state.get('tasks'):
+        await asyncio.gather(*tuple(state['tasks']), return_exceptions=True)

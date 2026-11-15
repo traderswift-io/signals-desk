@@ -63,6 +63,10 @@ London changes on the last Sunday in March and October; New York changes on the 
 
 Prepare private `desk/config.json` from [desk/config.example.json](desk/config.example.json) as described in the execution skill. Replace all placeholders, use `<ACCOUNT_ADDRESS>` consistently for `account_address`, `vault_address` and `policy.vault_address`, and set mode 0600. Routine-driven workspaces must set `resident: false` and `stop_mode: software`; the example's resident default is for the continuously running service. Protect the key, journal and control socket directories with owner-only permissions.
 
+Routine-driven (Grok) workspaces must remove `signals_url`, `subscriber_token_file`, `signals_access_client_id` and `signals_access_client_secret` from `desk/config.json`, because only the resident consumer reports deliveries. The resident service reports each stream entry by its stream entry ID; Grok seats make no delivery report, because the service records their GET. Assign one subscriber token to one desk.
+
+For the resident consumer, use an HTTPS `signals_url` without embedded credentials and the four delivery fields documented in [desk/README.md](desk/README.md). Reporting is off when `signals_url` is absent. If it is set but the token file is unreadable, empty or multi-line, reporting stays off and a sanitized `deliveries_disabled` reason is recorded; recovery and trading continue. Invalid delivery URLs or missing delivery credentials also disable reporting. Fix the configuration and restart to enable reports; entries consumed while reporting is disabled are not queued for later reporting.
+
 In the Executor's persistent workspace, run once from the checkout root:
 
 ```sh

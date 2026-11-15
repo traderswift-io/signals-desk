@@ -28,7 +28,9 @@ def read_records(path):
     target = Path(path)
     if not target.exists():
         return []
-    return [json.loads(line) for line in target.read_text().splitlines() if line]
+    with target.open(encoding='utf-8') as stream:
+        fcntl.flock(stream, fcntl.LOCK_SH)
+        return [json.loads(line) for line in stream.read().splitlines() if line]
 
 
 def ticket_key(config, signal):
@@ -96,14 +98,23 @@ def reader_cursor(config):
     return rows[-1]['stream_id'] if rows else '0-0'
 
 
-def pending_deliveries(config):
-    pending = {}
+def delivery_state(config):
+    pending, abandoned, not_before = {}, set(), 0
     for row in read_records(config['record_path']):
         if row['event'] == 'delivery_pending':
-            pending[row['event_id']] = row
-        elif row['event'] == 'delivery_reported':
+            if row['event_id'] not in abandoned:
+                pending[row['event_id']] = row
+        elif row['event'] in ('delivery_reported', 'delivery_abandoned'):
             pending.pop(row['event_id'], None)
-    return list(pending.values())
+            if row['event'] == 'delivery_abandoned':
+                abandoned.add(row['event_id'])
+        if row['event'].startswith('delivery_') and row.get('status') == 429:
+            not_before = max(not_before, row.get('not_before', 0))
+    return pending, abandoned, not_before
+
+
+def pending_deliveries(config):
+    return list(delivery_state(config)[0].values())
 
 
 def writer_lock(config):

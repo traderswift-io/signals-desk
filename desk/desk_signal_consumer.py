@@ -7,14 +7,14 @@ import aiohttp
 import redis.asyncio as redis
 from redis.exceptions import ConnectionError, TimeoutError
 
-from .desk_deliveries import finish_deliveries, prepare_deliveries, schedule_delivery
+from .desk_deliveries import finish_deliveries, prepare_deliveries, queue_delivery, schedule_delivery
 from .desk_executor import cancel, control_connection, create_runtime, event_worker, recover, shutdown, submit
 from .desk_io import load_config
 from .desk_record import append_record, reader_cursor, writer_lock
 
 
 async def consume(runtime, client, maximum_entries=None):
-    prepare_deliveries(runtime)
+    await prepare_deliveries(runtime)
     config = runtime['config']
     stream, cursor = config['redis']['stream'], reader_cursor(config)
     count = 0
@@ -28,16 +28,12 @@ async def consume(runtime, client, maximum_entries=None):
             raise
         for _, entries in results:
             for entry_id, fields in entries:
+                consumed = False
                 try:
                     required = ('event_id', 'ts', 'source', 'correlation_id', 'signal_id', 'kind', 'envelope', 'segment_hash', 'receipt')
                     if any(name not in fields for name in required):
                         raise ValueError('incomplete_stream_entry')
-                    timestamp = int(fields['ts'])
-                    if timestamp < 0:
-                        raise ValueError('invalid_stream_event')
                     envelope = json.loads(fields['envelope'])
-                    if not isinstance(envelope, dict):
-                        raise ValueError('invalid_stream_envelope')
                     if 'payload' not in envelope:
                         envelope = {'version': 1, 'payload': envelope, 'receipt': json.loads(fields['receipt']) if fields['receipt'] else None}
                     payload = envelope['payload']
@@ -47,11 +43,13 @@ async def consume(runtime, client, maximum_entries=None):
                         raise ValueError('stream_kind_mismatch')
                     result = await submit(runtime, envelope)
                     append_record(config['record_path'], 'consumed', stream_id=entry_id, result=result)
-                    schedule_delivery(runtime, fields['signal_id'], entry_id, timestamp)
+                    consumed = True
                 except (ValueError, KeyError, TypeError) as error:
                     append_record(config['record_path'], 'stream_refusal', stream_id=entry_id, reason=str(error))
-                    schedule_delivery(runtime)
+                if consumed:
+                    await queue_delivery(runtime, fields['signal_id'], entry_id)
                 append_record(config['record_path'], 'cursor', stream=stream, stream_id=entry_id)
+                schedule_delivery(runtime, entry_id if consumed else None)
                 cursor = entry_id
                 count += 1
     return cursor
@@ -69,7 +67,7 @@ async def main(config_path):
         socket_path.unlink(missing_ok=True)
         async with aiohttp.ClientSession() as session:
             runtime = create_runtime(config, session)
-            prepare_deliveries(runtime)
+            await prepare_deliveries(runtime)
             runtime['worker'] = asyncio.create_task(event_worker(runtime))
             try:
                 await recover(runtime)
@@ -80,8 +78,10 @@ async def main(config_path):
                 async with server:
                     await consume(runtime, client)
             finally:
-                await shutdown(runtime)
-                await finish_deliveries(runtime)
+                try:
+                    await shutdown(runtime)
+                finally:
+                    await finish_deliveries(runtime)
     finally:
         await client.aclose()
         if server:
