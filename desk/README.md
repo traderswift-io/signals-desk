@@ -43,6 +43,8 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 
 | Field | Meaning |
 | --- | --- |
+| `chain_url` | Verifier HTTPS base; use `https://chain.traderswift.io`. Requires a host, empty or `/` path, and no userinfo, query or fragment. |
+| `provider_id`, `provider_address` | Publisher pin for `desk_anchor_verify.py`: ID matches `^[A-Za-z0-9._:-]{1,128}$` in full, excluding `.` and `..`; address is a nonempty string compared exactly. |
 | `coordinator_url` | Coordinator base URL; requests use only its prepare and intent routes. |
 | `builder_dexs` | Builder DEX names to search alongside the main perp universe; optional, defaults to an empty list. The example includes `xyz`. |
 | `resident` | Boolean, default `true`. Routine-driven bot workspaces must set `false`. |
@@ -59,7 +61,7 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 | `risk_fraction` | Fraction of equity risked across entry-to-stop distance. |
 | `leverage_cap` | Maximum entry notional divided by equity. |
 | `exit_band` | Fractional IOC price allowance beyond a stop/target or current mark. |
-| `request_timeout_seconds` | Coordinator request timeout, default 120 seconds. |
+| `request_timeout_seconds` | Coordinator request timeout, default 120 seconds. The anchor verifier defaults to 10 seconds and accepts only finite numbers (not booleans) with `0 < x <= 60`. |
 | `policy.epoch` | Expected live signer policy epoch. |
 | `policy.venues`, `policy.vault_address` | Allowed venues and required vault. |
 | `policy.expires_at` | Unix seconds at which orders, including reduce-only exits, cease to be allowed. |
@@ -109,13 +111,13 @@ After an ambiguous send, open orders, fills and account positions are reconciled
 | `desk_signal_consumer.py` | Redis reader, cursor, control socket and service entry point. |
 | `desk_record.py` | Synced journal, state, deduplication, budget, review and writer lock. |
 | `desk_keygen.py` | Exclusive private seed creation and public-key output. |
-| `desk_anchor_verify.py` | Chain reads (charter, provider, anchor) and JCS payload hash check before intake hands a signal on; prints one `VERIFY` line. |
+| `desk_anchor_verify.py` | Chain reads (charter, provider, anchor) and restricted JCS subset payload hash check (floats refused) before intake hands a signal on; prints JSON metadata and one `VERIFY` result line. |
 | `desk_scenarios.py` | Required scenario orchestration and execution assertions. |
 | `desk_scenarios_checks.py` | Pure financial, policy, source-tree and named timer checks. |
 | `desk_scenarios_execution.py` | Trade bursts, price precision, oracle failures, mapping and exit latency regressions. |
 | `desk_scenarios_fakes.py` | Local fake coordinator, Info, ticker and websocket. |
 | `desk_scenarios_redis.py` | Throwaway Redis process, ACL and restart scenarios. |
-| `desk_scenarios_anchor.py` | Anchor verification against a local fake chain: every refusal and the pass path. |
+| `desk_scenarios_anchor.py` | Mocked HTTPS transport with real aiohttp JSON decoding: transport self-check, pass, all twelve refusal names, address/config/ID validation, duplicate keys, safe output, timeout bounds, recursion, status/MIME precedence and restricted JCS fixtures. No live chain or TLS handshake is exercised. |
 
 The missing-asset reason is `asset_not_allowed`, matching the signer. Local-only guards have their own explicit reasons.
 
