@@ -5,6 +5,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import aiohttp
 
@@ -174,7 +175,7 @@ async def check_rate_limit():
         assert exits[0]['request_id'] == exits[1]['request_id']
         records = read_records(runtime['config']['record_path'])
         backoffs = [row for row in records if row['event'] == 'backoff']
-        assert len(backoffs) == 1 and backoffs[0]['retry'] and backoffs[0]['seconds'] == 0.01
+        assert len(backoffs) == 1 and backoffs[0]['retry'] and backoffs[0]['seconds'] == '0.01'
         sends = [row for row in records if row['event'] == 'intent' and row['intent']['reduce_only']]
         assert sends[1]['timestamp'] - sends[0]['timestamp'] >= 10
     async with fixture() as (runtime, fake):
@@ -288,9 +289,9 @@ async def check_extra():
         assert (await submit(runtime, envelope))['state'] == 'filled'
         await runtime['events'].join()
         ticket = runtime['tickets']['entry-only']
-        ticket['signal']['reply_by'] = now_ms() - 1
-        queue_event(runtime, ticket, {'channel': 'trades', 'data': [{'coin': 'BTC', 'px': '100000'}]})
-        await runtime['events'].join()
+        with patch('desk.desk_executor.now_ms', return_value=ticket['signal']['reply_by'] + 1):
+            queue_event(runtime, ticket, {'channel': 'trades', 'data': [{'coin': 'BTC', 'px': '100000'}]})
+            await runtime['events'].join()
         assert ticket['state'] == 'filled' and len(fake['intents']) == 1
         await cancel(runtime, 'entry-only')
     async with fixture() as (runtime, fake):

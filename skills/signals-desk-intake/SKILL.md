@@ -49,6 +49,7 @@ This skill runs exactly:
 - `GET https://chain.traderswift.io/network/v1/charter/signals`
 - `GET https://chain.traderswift.io/network/v1/provider/signals/<provider_id>`
 - `GET https://chain.traderswift.io/network/v1/anchor/signals/signal/<signal_id>/<provider_id>`
+- `python3 -m desk.desk_anchor_verify desk/config.json <envelope.json>`
 
 Run the single UTC routine at :01, :16, :31 and :46. First run `python3 -m desk.desk_wake desk/config.json`; on `no`, end immediately with no posting. On `yes`, carry the printed integer `close_ms` unchanged with every handoff. Ask the Executor to run its wake command with `--close-ms <close_ms>` before the subcommand, then read the private Signals service using the subscriber credential. Every Executor command and the Risk Gate command must carry that same `--close-ms <close_ms>` before the subcommand. Evaluate only the printed last closed 15m candle, never the forming bar. A missing or outdated close refuses `stale_wake_close`; end that handoff and wait for a new wake. Retain publications newer than that close for a later close, without altering their envelopes. The service records each signal returned by GET for this desk's token, so this seat makes no delivery report. After chain verification passes, post each publication as a Trading Floor ticket and save its unchanged envelope as `<envelope.json>` for the Position Sizer. Assets outside policy or absent from `symbols` are posted as "published, not traded in the demo" and are not routed to execution.
 

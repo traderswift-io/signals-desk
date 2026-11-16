@@ -16,9 +16,11 @@ Signals Desk adapts the upstream protocol layout; see [attribution](../../ATTRIB
 
 ## Inputs
 
-The unchanged `<envelope.json>`, the configured vault and current policy in private `desk/config.json`. Retain the example config fields, leaving unused door credentials and seed paths as placeholders. This command never reads a private seed or needs door credentials. Configure `delegate_public_key` with the Executor's public hex and the issued `key_ref`, and use the Executor's current journal for the shared daily budget. A missing or malformed public key refuses `invalid_delegate_public_key`; a missing journal counts as nothing signed today and a stale one understates it, so the local budget check is advisory; Signer still enforces the daily cap.
+The unchanged `<envelope.json>`, the configured vault and current policy in private `desk/config.json`. Retain the example config fields, leaving unused door credentials and seed paths as placeholders. This command never reads a private seed or needs door credentials. Configure `delegate_public_key` with the Executor's public hex and the issued `key_ref`, and use the Executor's current journal for the shared daily budget. A missing or malformed public key refuses `invalid_delegate_public_key`; routine previews require a matching anchor record before budget checks, and a stale journal understates signed size, so the local budget check is advisory; Signer still enforces the daily cap.
 
 ## Pre-send checklist
+
+Chain verification is the Desk Lead's gate in the routine: `desk_anchor_verify` must pass before handoff. Act only on an unchanged envelope that arrives with the Lead's ticket for that envelope, and refuse one that does not. Do not re-open or alter a passed envelope, and do not verify anchors yourself. Use `resident: false` for routine work. The routine Executor `run` and the `desk_ticket` gate and size previews recompute its payload hash and require the Lead's matching `anchor_verified` journal record for the same `signal_id` and `payload_hash`; otherwise they refuse `anchor_not_verified`. Report that refusal and stop the handoff.
 
 The Signer policy is the approval; require no chat approval phrase. Keep the exact ticket and policy fields. The Executor rechecks current state through the shared path.
 

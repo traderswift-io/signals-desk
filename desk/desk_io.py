@@ -45,6 +45,7 @@ def load_config(path, require_public_key=False):
             raise ValueError('invalid_delegate_public_key') from None
         if len(config['delegate_public_key']) != 64:
             raise ValueError('invalid_delegate_public_key')
+    config['_config_directory'] = str(Path(path).absolute().parent)
     return config
 
 

@@ -6,9 +6,10 @@ from pathlib import Path
 from aiohttp import web
 from nacl.signing import VerifyKey
 
-from .desk_executor import create_runtime, event_worker, shutdown
+from .desk_anchor_verify import payload_hash
+from .desk_executor import create_runtime, event_worker, shutdown, submit
 from .desk_keygen import generate_key
-from .desk_record import now_ms
+from .desk_record import append_record, now_ms
 
 
 def signal_envelope(identifier='sample', asset='BTC'):
@@ -234,3 +235,14 @@ async def eventually(predicate):
     async with asyncio.timeout(5):
         while not predicate():
             await asyncio.sleep(0.005)
+
+
+def record_anchor_fixture(config, envelope):
+    if not config.get('resident', True):
+        append_record(config['record_path'], 'anchor_verified',
+                      signal_id=envelope['payload']['signal_id'], payload_hash=payload_hash(envelope))
+
+
+async def submit_verified_fixture(runtime, envelope):
+    record_anchor_fixture(runtime['config'], envelope)
+    return await submit(runtime, envelope)

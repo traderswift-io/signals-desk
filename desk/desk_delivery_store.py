@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from . import desk_record
+from .desk_private_storage import private_open
 
 
 def sync_directory(path):
@@ -26,7 +27,7 @@ def write_row(stream, event, values):
 
 
 def append_delivery_record(path, event, **values):
-    with Path(path).open('r+b') as stream:
+    with private_open(path, 'r+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0, 2)
         write_row(stream, event, values)
@@ -34,9 +35,7 @@ def append_delivery_record(path, event, **values):
 
 def preserve_tail(path, tail):
     target = Path(str(path) + '.torn')
-    target.touch(mode=0o600, exist_ok=True)
-    target.chmod(0o600)
-    with target.open('ab') as copy:
+    with private_open(target, 'ab') as copy:
         fcntl.flock(copy, fcntl.LOCK_EX)
         copy.write(tail)
         desk_record.sync_file(copy)
@@ -45,7 +44,7 @@ def preserve_tail(path, tail):
 
 def prepare_delivery_store(config):
     path = Path(desk_record.delivery_path(config))
-    with path.open('a+b') as stream:
+    with private_open(path, 'a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0)
         lines = stream.readlines()

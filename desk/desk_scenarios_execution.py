@@ -6,7 +6,7 @@ from pathlib import Path
 from .desk_executor import cancel, close_ticket, process_event, submit
 from .desk_io import load_config, oracle_prices
 from .desk_record import now_ms, read_records
-from .desk_scenarios_fakes import signal_envelope
+from .desk_scenarios_fakes import record_anchor_fixture, signal_envelope, submit_verified_fixture
 from .desk_wake import last_close
 from .desk_watcher import queue_event
 from .signer_delegate_client import order_statuses
@@ -223,6 +223,7 @@ async def command_result(runtime, module, action, value):
             config.pop('delegate_public_key', None)
     config_path.write_text(json.dumps(config))
     if isinstance(value, dict):
+        record_anchor_fixture(config, value)
         envelope_path = directory / 'envelope.json'
         envelope_path.write_text(json.dumps(value))
         value = str(envelope_path)
@@ -308,22 +309,22 @@ async def check_nonresident(fixture):
         config.update(resident=False, stop_mode='software')
         assert await command_result(runtime, 'desk_executor', 'run', signal_envelope('missing-close')) == {
             'refused': 'stale_wake_close'}
-        assert await submit(runtime, signal_envelope('missing-close')) == {'refused': 'stale_wake_close'}
+        assert await submit_verified_fixture(runtime, signal_envelope('missing-close')) == {'refused': 'stale_wake_close'}
         runtime['close_ms'] = last_close(now_ms())
         result = await command_result(runtime, 'desk_executor', 'run', signal_envelope('routine'))
         assert result == {'refused': 'published_not_traded'}
         assert fake['prepares'] == 0 and not fake['intents'] and not fake['websockets']
-        assert await submit(runtime, signal_envelope()) == result
+        assert await submit_verified_fixture(runtime, signal_envelope()) == result
         assert fake['prepares'] == 0 and not fake['intents']
         path = Path(config['record_path']).parent / 'config.json'
         config['stop_mode'] = 'trigger'
         assert await command_result(runtime, 'desk_executor', 'run', signal_envelope('trigger-routine')) == result
-        assert await submit(runtime, signal_envelope('trigger')) == result
+        assert await submit_verified_fixture(runtime, signal_envelope('trigger')) == result
         assert fake['prepares'] == 0 and not fake['intents'] and not fake['websockets']
         for resident, stop_mode in ((True, 'software'), (True, 'trigger')):
             config.update(resident=resident, stop_mode=stop_mode)
             fake['unfilled_entry'] = True
-            assert (await submit(runtime, signal_envelope('resident-' + stop_mode)))['state'] == 'not_filled'
+            assert (await submit_verified_fixture(runtime, signal_envelope('resident-' + stop_mode)))['state'] == 'not_filled'
         config.pop('resident')
         config.pop('stop_mode')
         path.write_text(json.dumps(config))
@@ -339,13 +340,13 @@ async def check_nonresident(fixture):
                 raise AssertionError(reason)
     for stop_mode, envelope_cancel in (('software', False), ('software', True), ('trigger', False), ('trigger', True)):
         async with fixture() as (runtime, fake):
-            await submit(runtime, signal_envelope())
+            await submit_verified_fixture(runtime, signal_envelope())
             await runtime['events'].join()
             fake['orders'] = [{'oid': 42, 'coin': 'BTC', 'sz': '0.006'}]
             runtime['config'].update(resident=False, stop_mode=stop_mode)
             if envelope_cancel:
                 envelope = {'version': 1, 'payload': {'kind': 'cancel', 'signal_id': 'sample', 'publisher': 'publisher-placeholder'}}
-                result = await submit(runtime, envelope)
+                result = await submit_verified_fixture(runtime, envelope)
             else:
                 result = await command_result(runtime, 'desk_executor', 'cancel', 'sample')
             assert result == {'state': 'exited'} and fake['position'] == 0 and not fake['orders']

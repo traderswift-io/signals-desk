@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from . import desk_signal_consumer as consumer
 from .desk_deliveries import prepare_deliveries, queue_delivery
 from .desk_delivery_store import sync_directory
+from .desk_private_storage import private_open
 from .desk_record import append_record, delivery_path, pending_deliveries, read_records, reader_cursor, sync_file
 from .desk_scenarios_fakes import configuration, signal_envelope
 from .desk_scenarios_redis import stream_fields
@@ -72,8 +73,8 @@ async def check_torn_tail():
             copy, events = Path(str(path) + '.torn'), []
             previous = b'earlier-torn-tail' if tail == tails[1] else b''
             if previous:
-                copy.write_bytes(previous)
-                copy.chmod(0o644)
+                with private_open(copy, 'ab') as stream:
+                    stream.write(previous)
 
             def synced_file(stream):
                 sync_file(stream)
@@ -140,7 +141,7 @@ async def check_unreadable_store():
         config = restart_config(Path(directory))
         path = Path(delivery_path(config))
         append_record(path, 'delivery_pending', signal_id='queued', event_id='1-0', status='queued')
-        original, opened = path.read_bytes(), Path.open
+        original, opened = path.read_bytes(), private_open
 
         def unreadable(target, *args, **kwargs):
             if target == path:
@@ -154,7 +155,7 @@ async def check_unreadable_store():
             assert diagnostic['exception'] == 'PermissionError'
             assert 'fake-subscriber-token' not in Path(config['record_path']).read_text()
 
-        with patch.object(Path, 'open', new=unreadable):
+        with patch('desk.desk_delivery_store.private_open', new=unreadable):
             await consumer_restart(config, inspect)
         assert path.read_bytes() == original
 
@@ -205,7 +206,7 @@ async def check_creation_failure():
     for failure in ('create', 'file_sync', 'directory_sync'):
         with tempfile.TemporaryDirectory() as directory:
             config = restart_config(Path(directory))
-            path, opened = Path(delivery_path(config)), Path.open
+            path, opened = Path(delivery_path(config)), private_open
 
             def open_store(target, *args, **kwargs):
                 if target == path:
@@ -226,7 +227,7 @@ async def check_creation_failure():
                 assert diagnostic['exception'] in ('PermissionError', 'OSError')
                 assert 'fake-signals-secret' not in Path(config['record_path']).read_text()
 
-            injection = (patch.object(Path, 'open', new=open_store) if failure == 'create' else
+            injection = (patch('desk.desk_delivery_store.private_open', new=open_store) if failure == 'create' else
                          patch('desk.desk_record.sync_file', side_effect=file_sync) if failure == 'file_sync' else
                          patch('desk.desk_delivery_store.sync_directory', side_effect=OSError('fake-signals-secret')))
             with injection:
@@ -249,7 +250,7 @@ async def check_tail_copy_failure():
             tail = b'{"event":"delivery_reported"'
             with path.open('ab') as stream:
                 stream.write(tail)
-            original, copy, opened = path.read_bytes(), Path(str(path) + '.torn'), Path.open
+            original, copy, opened = path.read_bytes(), Path(str(path) + '.torn'), private_open
 
             def open_copy(target, *args, **kwargs):
                 if target == copy:
@@ -269,7 +270,7 @@ async def check_tail_copy_failure():
                 assert diagnostic['exception'] in ('PermissionError', 'OSError')
                 assert 'fake-signals-secret' not in Path(config['record_path']).read_text()
 
-            injection = (patch.object(Path, 'open', new=open_copy) if failure == 'open' else
+            injection = (patch('desk.desk_delivery_store.private_open', new=open_copy) if failure == 'open' else
                          patch('desk.desk_record.sync_file', side_effect=file_sync) if failure == 'file_sync' else
                          patch('desk.desk_delivery_store.sync_directory', side_effect=OSError('fake-signals-secret')))
             with injection:

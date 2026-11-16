@@ -18,7 +18,7 @@ from .desk_keygen import generate_key
 from .desk_position_sizer import asset_metadata, size_position
 from .desk_record import append_record, now_ms, read_records
 from .desk_risk_gate import evaluate_intent
-from .desk_scenarios_fakes import configuration, info, meta, signal_envelope
+from .desk_scenarios_fakes import configuration, info, meta, signal_envelope, submit_verified_fixture
 from .desk_signal import parse_signal
 from .desk_ticket import main as ticket_main
 from .signer_delegate_client import cancel_fields, combine_meta, resolve_symbol
@@ -40,6 +40,11 @@ INTAKE_ALLOWED_CALLS = {
 }
 
 
+def listed_commands(text):
+    return {re.sub(r'^(GET )https://chain\.traderswift\.io(?=/network/v1/)', r'\1', command)
+            for command in re.findall(r'^- `([^`]+)`', text, re.MULTILINE)}
+
+
 def check_prompt_front_matter():
     root = Path(__file__).parent.parent
     prompt_sections = ['## Bot profile', '## System prompt', '### What you own',
@@ -58,6 +63,7 @@ def check_prompt_front_matter():
         assert re.findall(r'^#{2,3} .+$', text, re.MULTILINE) == prompt_sections, path
         skill_path = root / 'skills' / skill / 'SKILL.md'
         skill_text = skill_path.read_text()
+        assert listed_commands(text) == listed_commands(skill_text), name
         assert skill_text.startswith('---\nname: ' + skill + '\n'), skill_path
         metadata, separator, body = skill_text[4:].partition('\n---\n')
         assert separator and '\nlicense: MIT\nmetadata:\n' in metadata, skill_path
@@ -86,10 +92,9 @@ def check_intake():
         assert 'before ticket posting, routing or downstream action' in common
         assert 'Missing, ambiguous or failed required verification blocks processing.' in common
         assert 'trusts the served publication' not in common and 'no hub verification' not in common
-        pattern = r'^- `([A-Z]+) (?:https://chain\.traderswift\.io(?=/network/v1/))?([^`]+)`'
-        operations = {method + ' ' + path for method, path in re.findall(pattern, skill, re.MULTILINE)}
-        allowed = {method + ' ' + path for method, path in re.findall(pattern, common, re.MULTILINE)}
-        assert operations == allowed == INTAKE_ALLOWED_CALLS
+        expected = INTAKE_ALLOWED_CALLS | {'python3 -m desk.desk_wake desk/config.json',
+                                         'python3 -m desk.desk_anchor_verify desk/config.json <envelope.json>'}
+        assert listed_commands(skill) == listed_commands(common) == expected
         assert 'trusts the served publication' not in skill and 'no hub verification' not in skill
 
     check_pair(prompt, intake)
@@ -104,6 +109,13 @@ def check_intake():
     broken_skills = [intake + '\n- `POST /v1/orders`\n',
                      intake + '\n- `GET <hub-read-endpoint>`\n',
                      intake + '\n- `DELETE /v1/signals`\n']
+    for command in ('python3 -m desk.desk_wake desk/config.json',
+                    'python3 -m desk.desk_anchor_verify desk/config.json <envelope.json>'):
+        for replacement in ('', '- `python3 -m desk.unknown desk/config.json`\n'):
+            broken_prompts.append(prompt.replace('- `' + command + '`\n', replacement))
+            broken_skills.append(intake.replace('- `' + command + '`\n', replacement))
+    broken_prompts.append(prompt + '\n- `python3 -m desk.unknown desk/config.json`\n')
+    broken_skills.append(intake + '\n- `python3 -m desk.unknown desk/config.json`\n')
     for call in chain_calls:
         broken_prompts.append(prompt.replace('- `' + call + '`\n', ''))
         broken_skills.append(intake.replace('- `' + call + '`\n', ''))
@@ -223,7 +235,7 @@ async def check_ticket_local():
               patch('desk.desk_executor.arm', AsyncMock()) as watcher):
             for stop_mode in ('software', 'trigger'):
                 runtime['config']['stop_mode'] = stop_mode
-                result = await submit(runtime, signal_envelope(stop_mode))
+                result = await submit_verified_fixture(runtime, signal_envelope(stop_mode))
                 assert result == {'refused': 'trigger_price_outside_band'}
             coordinator.assert_not_awaited()
             watcher.assert_not_awaited()
@@ -263,8 +275,9 @@ async def check_ticket_preview_local():
                     config['policy']['asset_caps'][0].update(max_order_size='0.02', max_daily_size='0.015')
                     append_record(config['record_path'], 'intent', intent={
                         'request_id': 'spent', 'kind': 'order', 'reduce_only': False, 'asset': 'BTC',
-                        'delegate_key': config['delegate_public_key'], 'key_ref': config['key_ref'], 'size': '0.01'})
-                    append_record(config['record_path'], 'reply', request_id='spent', signed=True)
+                        'delegate_key': config['delegate_public_key'], 'key_ref': config['key_ref'], 'size': '0.01',
+                        'asset_index': 0, 'is_buy': True, 'limit_px': '100000', 'tif': 'Ioc'})
+                    append_record(config['record_path'], 'reply', request_id='spent', signed=True, ambiguous=True)
                 envelope = signal_envelope(case)
                 envelope['payload']['side'] = side
                 envelope['payload']['levels'] = {'entry': '97123.456', 'stop': stop, 'target': None}
@@ -324,7 +337,12 @@ def check_tree_style():
             assert not isinstance(node, ast.ClassDef), path.name
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or '']
-                assert all(name != 'os' and not name.startswith('os.') for name in names), path.name
+                assert all(name != 'os' and not name.startswith('os.') for name in names) or (
+                    isinstance(node, ast.ImportFrom) and node.module == 'os' and
+                    {alias.name for alias in node.names} <= {
+                        'desk_private_storage.py': {'O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_RDONLY',
+                                                    'close', 'fchmod', 'fstat', 'geteuid', 'open'},
+                        'desk_scenarios_journal.py': {'umask'}}.get(path.name, set())), path.name
                 if path.name == 'signer_delegate_client.py':
                     assert all(not name.startswith('desk') for name in names), path.name
                     assert not isinstance(node, ast.ImportFrom) or node.level == 0, path.name

@@ -6,12 +6,14 @@ from pathlib import Path
 
 import aiohttp
 
+from .desk_anchor_verify import anchor_refusal, decode_json
 from .desk_bracket import entry_candle_guard
 from .desk_routine import bracket_result, maintain_routine, recover_routine
 from .desk_coordinator import run_round
 from .desk_io import entry_preview, load_config, order_fields
+from .desk_private_storage import prepare_private_storage
 from .signer_delegate_client import account_state, cancel_fields, create_client, dex_fields, market_context, price_text, read_info, reconcile_asset, refresh_meta, resolve_symbol
-from .desk_record import already_acted, append_record, latest_tickets, now_ms, review, set_state, signed_today, ticket_key, writer_lock
+from .desk_record import already_acted, append_record, journal_guard, latest_tickets, now_ms, review, set_state, signed_today, ticket_key, writer_lock
 from .desk_risk_gate import evaluate_intent
 from .desk_signal import parse_signal
 from .desk_watcher import arm, disarm
@@ -36,11 +38,11 @@ async def reconcile(runtime, ticket):
         total = sum((Decimal(fill['sz']) for fill in matching), Decimal(0))
         if total:
             ticket['fill_price'] = str(sum((Decimal(fill['px']) * Decimal(fill['sz']) for fill in matching), Decimal(0)) / total)
+    append_record(config['record_path'], 'reconcile', key=ticket['key'], orders=ticket['orders'],
+                  fills=matching, position=ticket['position'])
     if ticket['position'] and ticket['state'] != 'filled':
         set_state(config, ticket, 'filled', fill_price=ticket.get('fill_price') or position.get('entryPx'))
         ticket['fill_price'] = ticket.get('fill_price') or position.get('entryPx')
-    append_record(config['record_path'], 'reconcile', key=ticket['key'], orders=ticket['orders'],
-                  fills=matching, position=ticket['position'])
     return ticket['position']
 
 
@@ -93,12 +95,29 @@ async def close_ticket(runtime, ticket, reason, trigger=None):
 async def submit(runtime, envelope):
     async with runtime['operation_lock']:
         config = runtime['config']
+        if config.get('resident', True):
+            with journal_guard(config) as refusal:
+                latest_tickets(config)
+            if refusal:
+                return refusal
+        if not config.get('resident', True):
+            try:
+                envelope = decode_json(envelope) if isinstance(envelope, str) else envelope
+                reason = anchor_refusal(config, envelope)
+            except (ValueError, TypeError, RecursionError):
+                reason = 'anchor_not_verified'
+            if reason:
+                with journal_guard(config):
+                    append_record(config['record_path'], 'refusal', reason=reason)
+                return {'refused': reason}
         raw = json.loads(envelope) if isinstance(envelope, str) else envelope
         payload = raw.get('payload', {})
         try:
             signal = parse_signal(raw, await refresh_meta(runtime), now_ms())
         except (ValueError, KeyError, TypeError) as error:
-            append_record(config['record_path'], 'refusal', signal_id=payload.get('signal_id'), reason=str(error))
+            identity = payload.get('signal_id')
+            details = {'signal_id': identity} if type(identity) is str and identity.strip() else {}
+            append_record(config['record_path'], 'refusal', reason=str(error), **details)
             return {'refused': str(error)}
         if signal.get('kind') == 'cancel':
             return await cancel_locked(runtime, signal['signal_id'], signal['publisher'])
@@ -111,7 +130,11 @@ async def submit(runtime, envelope):
                 append_record(config['record_path'], 'refusal', signal_id=signal['signal_id'], reason=reason)
                 return {'refused': reason}
         key = ticket_key(config, signal)
-        if already_acted(config['record_path'], key):
+        with journal_guard(config) as refusal:
+            acted = already_acted(config['record_path'], key)
+        if refusal:
+            return refusal
+        if acted:
             append_record(config['record_path'], 'redelivery', key=key, reason='already_acted')
             return {'refused': 'already_acted'}
         ticket = {'key': key, 'signal': signal, 'claimed_at': now_ms(), 'position': Decimal(0), 'orders': [], 'alive': False, 'done': asyncio.Event()}
@@ -120,8 +143,12 @@ async def submit(runtime, envelope):
         runtime['tickets'][signal['signal_id']] = ticket
         try:
             sized, fields, gate_intent, account = await entry_preview(runtime, signal)
-            reason = evaluate_intent(gate_intent, config['policy'], runtime['asset_indices'], signed_today(config, signal['asset']),
-                                     now_ms(), signal['reply_by'])
+            with journal_guard(config) as refusal:
+                budget = signed_today(config, signal['asset'])
+                reason = evaluate_intent(gate_intent, config['policy'], runtime['asset_indices'], budget,
+                                         now_ms(), signal['reply_by'])
+            if refusal:
+                return refusal
             append_record(config['record_path'], 'gate', key=key, reason=reason, sizing=sized,
                           entry_price=fields.get('entry', fields)['limit_px'], intent=gate_intent)
             if reason:
@@ -143,6 +170,8 @@ async def submit(runtime, envelope):
                 await arm(runtime, ticket)
             outcome = await run_round(runtime, ticket, fields)
             if not config.get('resident', True):
+                if outcome.get('reason') == 'anchor_not_verified':
+                    return {'refused': 'anchor_not_verified'}
                 return await bracket_result(runtime, ticket, outcome, reconcile)
             if outcome.get('ambiguous'):
                 ticket['uncertain'] = True
@@ -281,6 +310,16 @@ async def control_connection(runtime, reader, writer):
 
 async def main(arguments):
     config = load_config(arguments.config)
+    prepare_private_storage(config)
+    if arguments.action == 'run' and not config.get('resident', True):
+        try:
+            envelope = decode_json(Path(arguments.envelope).read_text())
+            reason = anchor_refusal(config, envelope)
+        except (ValueError, TypeError, OSError, RecursionError):
+            reason = 'anchor_not_verified'
+        if reason:
+            print(json.dumps({'refused': reason}))
+            return
     if arguments.action == 'cancel' and Path(config['control_socket']).exists():
         try:
             reader, writer = await asyncio.open_unix_connection(config['control_socket'])
@@ -303,13 +342,17 @@ async def main(arguments):
                 runtime['worker'] = asyncio.create_task(event_worker(runtime))
             try:
                 if not config.get('resident', True):
-                    await recover(runtime)
+                    with journal_guard(config if arguments.action == 'run' else {'resident': True}) as refusal:
+                        await recover(runtime)
+                    if refusal:
+                        print(json.dumps(refusal))
+                        return
                     if arguments.action == 'cancel':
                         result = await cancel(runtime, arguments.signal_id)
                     else:
                         result = await maintain_routine(runtime, reconcile)
                         if arguments.action == 'run' and 'refused' not in result:
-                            result = await submit(runtime, Path(arguments.envelope).read_text())
+                            result = await submit(runtime, envelope)
                     print(json.dumps(result))
                     return
                 if arguments.action == 'wake':

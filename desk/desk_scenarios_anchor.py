@@ -72,14 +72,19 @@ def transport(replies, requests, seconds=2, paths=PATHS):
 
 async def expect(config, envelope, reason, statuses=(), replies=None, seconds=2, paths=PATHS):
     requests = []
-    with patch('aiohttp.ClientSession.get', new=transport(replies or responses(), requests, seconds, paths)):
-        result = await verify(config, envelope)
+    with tempfile.TemporaryDirectory() as directory:
+        if isinstance(config, dict):
+            config = {**config, 'record_path': str(Path(directory) / 'journal.jsonl')}
+        with patch('aiohttp.ClientSession.get', new=transport(replies or responses(), requests, seconds, paths)):
+            result = await verify(config, envelope)
     assert result['result'] == reason and result['reads'] == list(statuses), result
     assert requests == paths[:len(statuses)], requests
     return result
 
 
 async def run_command(directory, config, envelope, reason, statuses=(), signal_id='sample', replies=None):
+    if isinstance(config, dict):
+        config = {**config, 'record_path': str(directory / 'journal.jsonl')}
     config_path = directory / 'config.json'
     envelope_path = directory / 'envelope.json'
     config_path.write_text(config if isinstance(config, str) else json.dumps(config))

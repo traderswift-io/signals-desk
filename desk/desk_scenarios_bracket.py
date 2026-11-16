@@ -12,13 +12,13 @@ from unittest.mock import AsyncMock, patch
 from nacl.signing import SigningKey
 
 from .desk_bracket import closed_price
-from .desk_executor import create_runtime, main as executor_main, process_event, reconcile, recover, submit
+from .desk_executor import create_runtime, main as executor_main, process_event, reconcile, recover
 from .desk_coordinator import run_round
 from .desk_io import oracle_prices
 from .desk_record import latest_tickets, now_ms, read_records, signed_today
 from .desk_routine import maintain_routine
 from .desk_scenarios_bracket_cleanup import check_leftover_leg_after_stop
-from .desk_scenarios_fakes import configuration, coordinator_intent, coordinator_prepare, info, signal_envelope, ticker
+from .desk_scenarios_fakes import configuration, coordinator_intent, coordinator_prepare, info, record_anchor_fixture, signal_envelope, submit_verified_fixture, ticker
 from .desk_ticket import main as ticket_main
 from .desk_wake import last_close, main as wake_main, wake_result
 from .signer_delegate_client import bracket_fields
@@ -39,7 +39,7 @@ async def fixture(resident=False):
             handler = {'info': info, 'prepare': coordinator_prepare, 'intent': coordinator_intent, 'ticker': ticker}[route]
             response = await handler(incoming)
             yield SimpleNamespace(status=response.status, headers=response.headers,
-                                  json=AsyncMock(return_value=loads(response.body)), raise_for_status=lambda: None)
+                                  json=AsyncMock(return_value=loads(response.body or '{}')), raise_for_status=lambda: None)
 
         session = SimpleNamespace(post=request, get=request)
         with patch('desk.signer_delegate_client.signing_key', return_value=SigningKey.generate()):
@@ -48,9 +48,11 @@ async def fixture(resident=False):
         yield runtime, fake
 
 
-async def command_result(runtime, action, value=None):
+async def command_result(runtime, action, value=None, verified=True):
     path = Path(runtime['config']['record_path']).parent / 'envelope.json'
     if value:
+        if verified:
+            record_anchor_fixture(runtime['config'], value)
         path.write_text(dumps(value))
 
     @asynccontextmanager
@@ -64,7 +66,7 @@ async def command_result(runtime, action, value=None):
           patch('desk.desk_executor.aiohttp.ClientSession', session_context), redirect_stdout(output)):
         arguments = SimpleNamespace(config='<fake>', action=action, envelope=str(path), input=str(path),
                                     close_ms=runtime.get('close_ms'))
-        await (ticket_main(arguments) if action == 'gate' else executor_main(arguments))
+        await (ticket_main(arguments) if action in ('size', 'gate') else executor_main(arguments))
     assert 'worker' not in runtime
     return loads(output.getvalue())
 
@@ -96,7 +98,7 @@ def wire_action(fields):
 async def check_bracket(short=False, target=True):
     async with fixture() as (runtime, fake):
         value = envelope(short=short, target=target)
-        result = await submit(runtime, value) if target else await command_result(runtime, 'run', value)
+        result = await submit_verified_fixture(runtime, value) if target else await command_result(runtime, 'run', value)
         assert result == {'state': 'sent'}
         assert fake['prepares'] == 1 and len(fake['intents']) == 1 and 'watcher_armed' not in fake['events']
         intent = fake['intents'][0]
@@ -114,7 +116,7 @@ async def check_bracket(short=False, target=True):
             assert (Decimal(trigger['triggerPx']) > Decimal(entry['p'])) == (short if index == 0 else not short)
             assert Decimal(leg['p']) == Decimal(trigger['triggerPx']) * (Decimal('1.005') if short else Decimal('0.995'))
         assert signed_today(runtime['config'], 'BTC') == Decimal('0.01')
-        assert (await submit(runtime, envelope()))['refused'] == 'already_acted'
+        assert (await submit_verified_fixture(runtime, envelope()))['refused'] == 'already_acted'
         await command_result(runtime, 'wake')
         assert len(fake['intents']) == 1 and not fake['websockets']
 
@@ -127,7 +129,7 @@ async def check_local_refusal(band=False):
         else:
             value['payload']['levels']['stop'] = '101000'
             fake['candle_close'] = '102000'
-        result = await submit(runtime, value)
+        result = await submit_verified_fixture(runtime, value)
         assert result == {'refused': 'trigger_price_outside_band' if band else 'stop_on_wrong_side_of_entry'}, result
         assert not fake['intents'] and fake['prepares'] == 0
         assert read_records(runtime['config']['record_path'])[-1]['reason'] == result['refused']
@@ -147,7 +149,7 @@ async def check_signer_refusal():
     for reason in reasons:
         async with fixture() as (runtime, fake):
             fake['bracket_refusal'] = reason
-            assert await submit(runtime, envelope()) == {'state': 'bracket_refused', 'reason': reason}
+            assert await submit_verified_fixture(runtime, envelope()) == {'state': 'bracket_refused', 'reason': reason}
             assert [intent['kind'] for intent in fake['intents']] == ['bracket']
             assert signed_today(runtime['config'], 'BTC') == 0
             rows = read_records(runtime['config']['record_path'])
@@ -181,15 +183,15 @@ async def check_wake(case):
 async def check_expired():
     for expiry, partial in ((True, False), (False, False), (True, True)):
         async with fixture() as (runtime, fake):
-            await submit(runtime, envelope())
+            await submit_verified_fixture(runtime, envelope())
             ticket = runtime['tickets']['bracket']
-            if expiry:
-                ticket['signal']['reply_by'] = now_ms() - 1
-            else:
+            if not expiry:
                 fake['candle_close'] = '98999'
             if partial:
                 fake['position'] = Decimal('0.004')
-            await maintain_routine(runtime, reconcile)
+            timestamp = ticket['signal']['reply_by'] + 1 if expiry else now_ms()
+            with patch('desk.desk_routine.now_ms', return_value=timestamp):
+                await maintain_routine(runtime, reconcile)
             kinds = [intent['kind'] for intent in fake['intents']]
             assert kinds[0] == 'bracket' and kinds[1:] == ['cancel'] * (1 if partial else 3)
             assert fake['intents'][1]['oid'] == 42
@@ -207,7 +209,7 @@ async def check_resident():
             fake['events'].append('watcher_armed')
 
         with patch('desk.desk_executor.arm', arm):
-            assert await submit(runtime, envelope()) == {'state': 'filled'}
+            assert await submit_verified_fixture(runtime, envelope()) == {'state': 'filled'}
         assert fake['intents'][0]['kind'] == 'order' and fake['intents'][0]['tif'] == 'Ioc'
         assert fake['events'].index('watcher_armed') < fake['events'].index('intent')
         await process_event(runtime, runtime['tickets']['bracket'], {'channel': 'trades', 'data': [{'coin': 'BTC', 'px': '98999'}]})
@@ -219,18 +221,18 @@ async def check_candle_guards():
     async with fixture() as (runtime, fake):
         value = envelope()
         value['payload']['published_at'] = last_close(now_ms()) + 1
-        assert await submit(runtime, value) == {'refused': 'awaiting_candle_close'}
+        assert await submit_verified_fixture(runtime, value) == {'refused': 'awaiting_candle_close'}
         value['payload']['published_at'] = last_close(now_ms()) - 1
         with patch('desk.desk_bracket.read_info', AsyncMock(return_value=[])):
-            assert await submit(runtime, value) == {'refused': 'closed_candle_unavailable'}
+            assert await submit_verified_fixture(runtime, value) == {'refused': 'closed_candle_unavailable'}
         fake['candle_close'] = '98999'
-        assert await submit(runtime, value) == {'refused': 'signal_invalidated'}
+        assert await submit_verified_fixture(runtime, value) == {'refused': 'signal_invalidated'}
         fake['candle_close'] = '100000'
-        assert await submit(runtime, value) == {'state': 'sent'}
+        assert await submit_verified_fixture(runtime, value) == {'state': 'sent'}
         assert len(fake['intents']) == 1
     async with fixture() as (runtime, fake):
         runtime['config']['policy']['asset_caps'][0]['max_daily_size'] = '0.009'
-        assert await submit(runtime, envelope()) == {'refused': 'over_max_daily_size'}
+        assert await submit_verified_fixture(runtime, envelope()) == {'refused': 'over_max_daily_size'}
         assert not fake['intents'] and fake['prepares'] == 0
     output = io.StringIO()
     with patch('desk.desk_wake.Path.read_text', side_effect=OSError), redirect_stdout(output):
@@ -243,7 +245,7 @@ async def check_candle_guards():
 async def check_later_flat_cleanup():
     for refused_order in (None, 42, 43):
         async with fixture() as (runtime, fake):
-            await submit(runtime, envelope())
+            await submit_verified_fixture(runtime, envelope())
             fake.update(position=Decimal('0.004'), candle_close='98999')
 
             async def cancel_once(runtime, ticket, fields):
@@ -272,7 +274,7 @@ async def check_later_flat_cleanup():
                     assert result['results'][0]['refused'] == 'cancel_refused'
                     assert [order['oid'] for order in fake['orders']] == [43]
                     assert runtime['tickets']['bracket']['state'] == 'filled'
-                    assert await submit(runtime, envelope('blocked')) == {'refused': 'account_busy'}
+                    assert await submit_verified_fixture(runtime, envelope('blocked')) == {'refused': 'account_busy'}
                     runtime['tickets'].clear()
                     await recover(runtime)
                     await maintain_routine(runtime, reconcile)
@@ -282,7 +284,7 @@ async def check_later_flat_cleanup():
                 cancellations = [row for row in read_records(runtime['config']['record_path']) if row['event'] == 'cancel_result']
                 assert any(row['outcome'].get('reason') == 'cancel_refused' for row in cancellations) == bool(refused_order)
                 await maintain_routine(runtime, reconcile)
-                assert await submit(runtime, envelope('next')) == {'state': 'sent'}
+                assert await submit_verified_fixture(runtime, envelope('next')) == {'state': 'sent'}
 
 
 async def check_wake_close_handoff():
@@ -314,13 +316,13 @@ async def check_wake_close_handoff():
             reads = len(fake['info_requests'])
             assert (await command_result(runtime, 'gate', value))['refused'] == 'stale_wake_close'
             assert await command_result(runtime, 'run', value) == {'refused': 'stale_wake_close'}
-            assert await submit(runtime, value) == {'refused': 'stale_wake_close'}
+            assert await submit_verified_fixture(runtime, value) == {'refused': 'stale_wake_close'}
             assert await command_result(runtime, 'wake') == {'refused': 'stale_wake_close'}
             assert not any(row['type'] == 'candleSnapshot' for row in fake['info_requests'][reads:])
             assert len(fake['intents']) == 1
             for close in (None, printed['close_ms'] + 1, printed['close_ms'] + 1800000):
                 runtime['close_ms'] = close
-                assert await submit(runtime, value) == {'refused': 'stale_wake_close'}
+                assert await submit_verified_fixture(runtime, value) == {'refused': 'stale_wake_close'}
         clock.return_value = timestamp * 1000000
         async with fixture() as (runtime, fake):
             async def delayed_prices(*arguments):
@@ -331,7 +333,7 @@ async def check_wake_close_handoff():
             value = envelope()
             value['payload']['reply_by'] = timestamp + 3600000
             with patch('desk.desk_coordinator.oracle_prices', delayed_prices):
-                result = await submit(runtime, value)
+                result = await submit_verified_fixture(runtime, value)
                 assert result == {'state': 'bracket_refused', 'reason': 'stale_wake_close'}, result
             assert fake['prepares'] == 1 and not fake['intents']
 
@@ -343,7 +345,7 @@ async def check_maintenance_close_boundary():
             async with fixture() as (runtime, fake):
                 value = envelope()
                 value['payload']['reply_by'] = timestamp + 3600000
-                assert await submit(runtime, value) == {'state': 'sent'}
+                assert await submit_verified_fixture(runtime, value) == {'state': 'sent'}
                 close = runtime['close_ms']
                 assert datetime.fromtimestamp(close / 1000, timezone.utc).isoformat() == '2026-11-16T12:15:00+00:00'
                 fake['candle_close'] = price

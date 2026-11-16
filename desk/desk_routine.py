@@ -3,7 +3,8 @@ from decimal import Decimal
 
 from .desk_bracket import closed_price, invalidated, wake_close_refusal
 from .desk_coordinator import run_round
-from .desk_record import append_record, latest_tickets, now_ms, read_records, review, set_state
+from .desk_journal_evidence import entry_completion_agrees
+from .desk_record import append_record, bracket_result_agrees, latest_tickets, now_ms, read_records, review, set_state
 from .desk_wake import active_asset
 from .signer_delegate_client import cancel_fields, order_statuses
 
@@ -18,7 +19,8 @@ async def bracket_result(runtime, ticket, outcome, reconcile):
         return {'state': 'bracket_refused', 'reason': reason}
     ticket['uncertain'] = bool(outcome.get('ambiguous'))
     statuses = order_statuses(outcome)
-    append_record(config['record_path'], 'bracket_result', key=ticket['key'], outcome=outcome)
+    append_record(config['record_path'], 'bracket_result', key=ticket['key'],
+                  request_id=outcome['intent']['request_id'], outcome=outcome)
     await reconcile(runtime, ticket)
     if ticket['uncertain'] or any(isinstance(status, dict) and 'error' in status for status in statuses):
         ticket['uncertain'] = True
@@ -43,9 +45,12 @@ async def recover_routine(runtime, reconcile):
         runtime['tickets'][key[2]] = ticket
         await reconcile(runtime, ticket)
         if not ticket['position'] and not ticket['orders']:
-            records = [record for record in read_records(config['record_path']) if record.get('key') == list(key)]
-            outcomes = [record['outcome'] for record in records if record['event'] == 'bracket_result']
-            if ticket['entry_done'] or outcomes and outcomes[-1].get('signed') is True and not outcomes[-1].get('ambiguous'):
+            records = read_records(config['record_path'])
+            outcomes = [record for record in records if record['event'] == 'bracket_result' and record['key'] == list(key)]
+            confirmed = (outcomes and bracket_result_agrees(records, outcomes[-1])
+                         and outcomes[-1]['outcome'].get('signed') is True
+                         and not outcomes[-1]['outcome'].get('ambiguous'))
+            if entry_completion_agrees(records, ticket['key']) or confirmed:
                 set_state(config, ticket, 'exited', reason='venue_flat')
                 review(config, ticket)
             else:
@@ -118,7 +123,7 @@ async def maintain_routine(runtime, reconcile):
                     results.append({'signal_id': signal['signal_id'], 'refused': refusal})
                     break
             else:
-                if not ticket.get('entry_done'):
+                if not ticket.get('entry_done') and entry_completion_agrees(read_records(config['record_path']), ticket['key']):
                     ticket['entry_done'] = True
                     set_state(config, ticket, ticket['state'], reason=reason)
                 if ticket.get('entry_done') and not ticket['position']:

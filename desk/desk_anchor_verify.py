@@ -4,10 +4,13 @@ import hashlib
 import json
 import math
 import re
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import aiohttp
+
+from .desk_record import append_record, decode_json, journal_guard, read_records, signed_today
 
 
 def canonical(value):
@@ -23,21 +26,29 @@ def canonical(value):
     raise ValueError('payload_not_canonical')
 
 
-def unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError('duplicate_key')
-        result[key] = value
-    return result
+def payload_hash(envelope):
+    return hashlib.sha256(canonical(envelope['payload']).encode('utf-8')).hexdigest()
 
 
-def reject_constant(value):
-    raise ValueError('non_json_constant')
-
-
-def decode_json(text):
-    return json.loads(text, object_pairs_hook=unique_object, parse_constant=reject_constant)
+def anchor_refusal(config, envelope):
+    if config.get('resident', True):
+        return None
+    with journal_guard(config):
+        signal_id = envelope['payload']['signal_id']
+        digest = payload_hash(envelope)
+        records = read_records(config['record_path'])
+        assets = set()
+        for row in records:
+            if row['event'] == 'intent':
+                intent = row['intent']
+                assets.add(intent.get('entry', intent).get('asset'))
+        for asset in assets:
+            signed_today(config, asset, records=records)
+        if valid_id(signal_id) and any(
+                row.get('event') == 'anchor_verified' and row.get('signal_id') == signal_id
+                and row.get('payload_hash') == digest for row in records):
+            return None
+    return 'anchor_not_verified'
 
 
 def validate_unicode(value):
@@ -63,6 +74,8 @@ def validate_config(config):
     provider = config.get('provider_id')
     base = config.get('chain_url')
     seconds = config.get('request_timeout_seconds', 10)
+    if type(seconds) is Decimal:
+        seconds = float(seconds)
     if not isinstance(address, str) or not address or not valid_id(provider):
         raise ValueError('invalid_input')
     if type(seconds) not in (int, float) or not 0 < seconds <= 60 or not math.isfinite(seconds):
@@ -111,7 +124,7 @@ async def verify(config, envelope):
         if not valid_id(signal_id):
             return {**result, 'result': 'invalid_envelope'}
         result['signal_id'] = signal_id
-        digest = hashlib.sha256(canonical(payload).encode('utf-8')).hexdigest()
+        digest = payload_hash(envelope)
     except RecursionError:
         return result
     except (ValueError, TypeError, AttributeError):
@@ -133,6 +146,10 @@ async def verify(config, envelope):
                     return {**result, 'result': 'hash_mismatch'}
     except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, RecursionError):
         return {**result, 'result': 'chain_unavailable'}
+    try:
+        append_record(config['record_path'], 'anchor_verified', signal_id=signal_id, payload_hash=digest)
+    except (ValueError, KeyError, TypeError, OSError):
+        return {**result, 'result': 'invalid_input'}
     return {**result, 'result': 'pass'}
 
 

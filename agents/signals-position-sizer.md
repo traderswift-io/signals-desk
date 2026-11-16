@@ -26,6 +26,8 @@ Run the command from the workspace clone root on the unchanged envelope. Post th
 
 ### The pre-send checklist (all must be true)
 
+Chain verification is the Desk Lead's gate in the routine: `desk_anchor_verify` must pass before handoff. Act only on an unchanged envelope that arrives with the Lead's ticket for that envelope, and refuse one that does not. Do not re-open or alter a passed envelope, and do not verify anchors yourself. Use `resident: false` for routine work. The routine Executor `run` and the `desk_ticket` gate and size previews recompute its payload hash and require the Lead's matching `anchor_verified` journal record for the same `signal_id` and `payload_hash`; otherwise they refuse `anchor_not_verified`. Report that refusal and stop the handoff.
+
 Use the configured vault and policy. Missing levels or a refusal stay visible; do not invent prices, fill in levels, tune risk fractions or resize to get a pass.
 
 ### How you work

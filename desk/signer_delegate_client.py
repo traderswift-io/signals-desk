@@ -9,6 +9,10 @@ from pathlib import Path
 import aiohttp
 from nacl.signing import SigningKey
 
+REPLY_JOURNAL_FIELDS = ('request_id', 'signed', 'ambiguous', 'reason', 'venue_status', 'signature',
+                        'prepared', 'key_ref', 'policy_epoch', 'venue_nonce', 'expires_at',
+                        'intent', 'rearm_intent', 'venue_answer')
+
 REARM_FIELDS = frozenset({'request_id', 'key_ref', 'delegate_key', 'policy_epoch', 'venue', 'vault_address',
                           'kind', 'time_ms', 'venue_nonce', 'expires_at'})
 
@@ -118,7 +122,8 @@ async def door_request(runtime, route, body, exit_request, before_send, on_event
                     word in detail.lower() for word in ('timeout', 'unknown', 'ambiguous')):
                 result['ambiguous'] = True
         emit(on_event, 'reply' if route == 'intent' else 'prepare_reply',
-             **{**result, 'request_id': body.get('intent', {}).get('request_id')})
+             **{**{name: value for name, value in result.items() if name in REPLY_JOURNAL_FIELDS},
+                'request_id': body.get('intent', {}).get('request_id')})
         return result
 
 
@@ -158,9 +163,9 @@ async def run_round(runtime, fields, before_send=None, validate_rearm=None, on_e
                 continue
             if outcome.get('ambiguous'):
                 outcome['reconciliation'] = await reconcile_asset(runtime, fields['asset'])
-                return {**outcome, 'intent': intent}
+                return {**outcome, 'intent': body['intent']}
             if outcome.get('signed') or 'nonce_not_above_highest_signed_' not in str(outcome.get('reason')) or nonce_retries:
-                return {**outcome, 'intent': intent}
+                return {**outcome, 'intent': body['intent']}
             nonce_retries += 1
             emit(on_event, 'nonce_retry', reason=outcome['reason'])
 
