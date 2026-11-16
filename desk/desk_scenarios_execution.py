@@ -7,6 +7,7 @@ from .desk_executor import cancel, close_ticket, process_event, submit
 from .desk_io import load_config, oracle_prices
 from .desk_record import now_ms, read_records
 from .desk_scenarios_fakes import signal_envelope
+from .desk_wake import last_close
 from .desk_watcher import queue_event
 from .signer_delegate_client import order_statuses
 
@@ -225,8 +226,9 @@ async def command_result(runtime, module, action, value):
         envelope_path = directory / 'envelope.json'
         envelope_path.write_text(json.dumps(value))
         value = str(envelope_path)
+    close_arguments = ['--close-ms', str(runtime['close_ms'])] if runtime.get('close_ms') is not None else []
     process = await asyncio.create_subprocess_exec('python3', '-B', '-m', 'desk.' + module,
-                                                   '--config', str(config_path), action, value,
+                                                   '--config', str(config_path), *close_arguments, action, value,
                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     output, errors = await process.communicate()
     assert process.returncode == 0, errors.decode()
@@ -304,8 +306,12 @@ async def check_nonresident(fixture):
     async with fixture() as (runtime, fake):
         config = runtime['config']
         config.update(resident=False, stop_mode='software')
+        assert await command_result(runtime, 'desk_executor', 'run', signal_envelope('missing-close')) == {
+            'refused': 'stale_wake_close'}
+        assert await submit(runtime, signal_envelope('missing-close')) == {'refused': 'stale_wake_close'}
+        runtime['close_ms'] = last_close(now_ms())
         result = await command_result(runtime, 'desk_executor', 'run', signal_envelope('routine'))
-        assert result == {'refused': 'no_resting_stop_until_rotation'}
+        assert result == {'refused': 'published_not_traded'}
         assert fake['prepares'] == 0 and not fake['intents'] and not fake['websockets']
         assert await submit(runtime, signal_envelope()) == result
         assert fake['prepares'] == 0 and not fake['intents']

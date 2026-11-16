@@ -10,6 +10,8 @@ def positive(value):
 
 
 def evaluate_intent(intent, policy, asset_index_by_name, size_spent_today, now_ms, reply_by=None):
+    if intent['kind'] == 'bracket':
+        intent = {**intent, **intent['entry']}
     now = now_ms // 1000
     if now >= intent['expires_at']:
         return 'intent_expired'

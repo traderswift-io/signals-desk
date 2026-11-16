@@ -43,6 +43,8 @@ def already_acted(path, key):
 
 def set_state(config, ticket, state, **values):
     details = {'claimed_at': ticket['claimed_at'], 'fill_price': ticket.get('fill_price'),
+               'entry_done': ticket.get('entry_done', False), 'close_ms': ticket.get('close_ms'),
+               'entry_cancel_reason': ticket.get('entry_cancel_reason'),
                'stop_hit': ticket.get('stop_hit', False), **values}
     append_record(config['record_path'], 'state', key=ticket['key'], state=state, signal=ticket['signal'], **details)
     ticket['state'] = state
@@ -66,6 +68,8 @@ def signed_today(config, asset, timestamp=None):
     intents = {row['intent']['request_id']: row for row in rows if row['event'] == 'intent'}
     for row in intents.values():
         intent = row['intent']
+        if intent['kind'] == 'bracket':
+            intent = {**intent, **intent['entry']}
         if intent['kind'] != 'order' or intent['reduce_only'] or intent['asset'] != asset:
             continue
         if intent['delegate_key'] != config['delegate_public_key'] or intent['key_ref'] != config['key_ref']:
@@ -88,9 +92,10 @@ def review(config, ticket):
     entry = Decimal(ticket['signal']['levels']['entry'])
     fill = ticket.get('fill_price')
     direction = Decimal(1) if ticket['signal']['side'] == 'long' else Decimal(-1)
+    stop_mode = 'software' if config.get('resident', True) else 'bracket'
     append_record(path, 'review', key=ticket['key'], signal_entry=entry, fill_price=fill,
                   slippage=(Decimal(fill) - entry) * direction if fill is not None else None,
-                  stop_hit=ticket.get('stop_hit', False), stop='software', description='stop: software')
+                  stop_hit=ticket.get('stop_hit', False), stop=stop_mode, description='stop: ' + stop_mode)
 
 
 def reader_cursor(config):

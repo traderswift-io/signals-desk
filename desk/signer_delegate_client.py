@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 import uuid
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -230,7 +230,8 @@ async def market_context(runtime, symbol, timeout_seconds=10):
 
 async def reconcile_asset(runtime, symbol):
     account = runtime['config']['account_address']
-    orders = await read_info(runtime, 'openOrders', user=account, **dex_fields(symbol))
+    orders = await read_info(runtime, 'openOrders' if runtime['config'].get('resident', True) else 'frontendOpenOrders',
+                             user=account, **dex_fields(symbol))
     fills = await read_info(runtime, 'userFills', user=account)
     state = await account_state(runtime, symbol)
     return {'orders': [order for order in orders if order['coin'] == symbol],
@@ -266,6 +267,38 @@ def order_fields(asset, size, price, is_buy, reduce_only=False):
     return {'kind': 'order', 'asset_index': asset['asset_index'], 'asset': asset['asset'],
             'is_buy': is_buy, 'limit_px': str(price),
             'size': str(size), 'reduce_only': reduce_only, 'tif': 'Ioc'}
+
+
+def decimal_text(value):
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError('trigger_price_outside_band') from None
+    if not number.is_finite() or number <= 0:
+        raise ValueError('trigger_price_outside_band')
+    return format(number.normalize(), 'f')
+
+
+def bracket_fields(asset, size, entry_price, is_buy, stop_trigger, stop_limit,
+                   take_profit_trigger=None, take_profit_limit=None):
+    entry = order_fields(asset, decimal_text(size), decimal_text(entry_price), is_buy)
+    entry['tif'] = 'Gtc'
+    fields = {'kind': 'bracket', 'asset': asset['asset'], 'asset_index': asset['asset_index'], 'entry': entry}
+    for name, trigger, limit, tpsl in [('stop', stop_trigger, stop_limit, 'sl'),
+                                      ('take_profit', take_profit_trigger, take_profit_limit, 'tp')]:
+        if name == 'take_profit' and trigger is None and limit is None:
+            continue
+        trigger, limit = decimal_text(trigger), decimal_text(limit)
+        reference = Decimal(entry['limit_px'])
+        wrong_side = Decimal(trigger) >= reference if is_buy == (tpsl == 'sl') else Decimal(trigger) <= reference
+        if wrong_side:
+            raise ValueError('stop_on_wrong_side_of_entry' if tpsl == 'sl' else 'take_profit_on_wrong_side_of_entry')
+        if any(abs(Decimal(value) - reference) > reference / 2 for value in (trigger, limit)):
+            raise ValueError('trigger_price_outside_band')
+        fields[name] = {'asset': asset['asset'], 'asset_index': asset['asset_index'], 'is_buy': not is_buy,
+                        'size': entry['size'], 'reduce_only': True, 'is_market': True,
+                        'trigger_px': trigger, 'limit_px': limit, 'tpsl': tpsl}
+    return fields
 
 
 def cancel_fields(asset, order_id):

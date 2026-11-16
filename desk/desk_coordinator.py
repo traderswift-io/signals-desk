@@ -1,3 +1,4 @@
+from .desk_bracket import wake_close_refusal
 from .desk_io import oracle_prices
 from .desk_record import append_record, now_ms, set_state, signed_today
 from .desk_risk_gate import evaluate_intent
@@ -14,12 +15,16 @@ async def run_round(runtime, ticket, fields):
 
     async def before_send(body):
         intent = body['intent']
+        if fields['kind'] == 'bracket' and wake_close_refusal(ticket.get('close_ms')):
+            return 'stale_wake_close'
         refusal = gate(intent)
         if refusal:
             return refusal
-        if not exit_request and not ticket['alive']:
+        if not exit_request and fields['kind'] != 'bracket' and not ticket['alive']:
             return 'watcher_not_alive'
         prices = await oracle_prices(runtime, ticket['signal']['asset'], exit_request)
+        if fields['kind'] == 'bracket' and wake_close_refusal(ticket.get('close_ms')):
+            return 'stale_wake_close'
         if not exit_request and any(prices.get(source + '_error') not in (None, 'unmapped') for source in ('hl_oracle', 'binance')):
             append_record(config['record_path'], 'oracle_refusal', key=ticket['key'], **prices)
             return 'oracle_unavailable'
@@ -33,7 +38,7 @@ async def run_round(runtime, ticket, fields):
 
     def on_event(event, **values):
         append_record(config['record_path'], event, key=ticket['key'], **values)
-        if event in ('reply', 'prepare_reply') and not ticket.get('closing'):
+        if config.get('resident', True) and event in ('reply', 'prepare_reply') and not ticket.get('closing'):
             runtime['events'].put_nowait((ticket, {'channel': 'coordinator_reply'}))
 
     outcome = await client_round(runtime, fields, before_send=before_send, validate_rearm=gate, on_event=on_event)

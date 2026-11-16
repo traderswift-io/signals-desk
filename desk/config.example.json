@@ -7,6 +7,8 @@
   "signals_access_client_secret": "<signals-service-token-secret>",
   "builder_dexs": ["xyz"],
   "resident": true,
+  "bracket_slippage_bps": "50",
+  "symbols": {"BTC": {"active_utc": [["00:00", "24:00"]], "days": "mon-sun"}},
   "stop_mode": "software",
   "info_url": "<venue-info-url>",
   "websocket_url": "<venue-websocket-url>",

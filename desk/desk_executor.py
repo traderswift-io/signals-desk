@@ -6,6 +6,8 @@ from pathlib import Path
 
 import aiohttp
 
+from .desk_bracket import entry_candle_guard
+from .desk_routine import bracket_result, maintain_routine, recover_routine
 from .desk_coordinator import run_round
 from .desk_io import entry_preview, load_config, order_fields
 from .signer_delegate_client import account_state, cancel_fields, create_client, dex_fields, market_context, price_text, read_info, reconcile_asset, refresh_meta, resolve_symbol
@@ -100,21 +102,28 @@ async def submit(runtime, envelope):
             return {'refused': str(error)}
         if signal.get('kind') == 'cancel':
             return await cancel_locked(runtime, signal['signal_id'], signal['publisher'])
+        if not config.get('resident', True):
+            try:
+                reason = await entry_candle_guard(runtime, signal)
+            except (ValueError, KeyError, TypeError, aiohttp.ClientError, TimeoutError) as error:
+                reason = str(error)
+            if reason:
+                append_record(config['record_path'], 'refusal', signal_id=signal['signal_id'], reason=reason)
+                return {'refused': reason}
         key = ticket_key(config, signal)
         if already_acted(config['record_path'], key):
             append_record(config['record_path'], 'redelivery', key=key, reason='already_acted')
             return {'refused': 'already_acted'}
         ticket = {'key': key, 'signal': signal, 'claimed_at': now_ms(), 'position': Decimal(0), 'orders': [], 'alive': False, 'done': asyncio.Event()}
+        ticket['close_ms'] = runtime.get('close_ms')
         set_state(config, ticket, 'claimed')
         runtime['tickets'][signal['signal_id']] = ticket
         try:
-            if not config.get('resident', True):
-                return await refuse(runtime, ticket, 'no_resting_stop_until_rotation')
             sized, fields, gate_intent, account = await entry_preview(runtime, signal)
             reason = evaluate_intent(gate_intent, config['policy'], runtime['asset_indices'], signed_today(config, signal['asset']),
                                      now_ms(), signal['reply_by'])
             append_record(config['record_path'], 'gate', key=key, reason=reason, sizing=sized,
-                          entry_price=fields['limit_px'], intent=gate_intent)
+                          entry_price=fields.get('entry', fields)['limit_px'], intent=gate_intent)
             if reason:
                 return await refuse(runtime, ticket, reason)
             if any(other is not ticket and other['state'] in ('claimed', 'sent', 'filled') for other in runtime['tickets'].values()):
@@ -130,8 +139,11 @@ async def submit(runtime, envelope):
                 other_orders = await read_info(runtime, 'openOrders', user=config['account_address'], **dex_fields(other_symbol))
                 if other_orders or any(Decimal(row['position']['szi']) for row in other_account['assetPositions']):
                     return await refuse(runtime, ticket, 'account_not_flat')
-            await arm(runtime, ticket)
+            if config.get('resident', True):
+                await arm(runtime, ticket)
             outcome = await run_round(runtime, ticket, fields)
+            if not config.get('resident', True):
+                return await bracket_result(runtime, ticket, outcome, reconcile)
             if outcome.get('ambiguous'):
                 ticket['uncertain'] = True
             await reconcile(runtime, ticket)
@@ -229,6 +241,8 @@ async def event_worker(runtime):
 async def recover(runtime):
     await refresh_meta(runtime)
     async with runtime['operation_lock']:
+        if not runtime['config'].get('resident', True):
+            return await recover_routine(runtime, reconcile)
         for key, row in latest_tickets(runtime['config']).items():
             if row['state'] in ('refused', 'exited', 'not_filled'):
                 continue
@@ -284,8 +298,23 @@ async def main(arguments):
     try:
         async with aiohttp.ClientSession() as session:
             runtime = create_runtime(config, session)
-            runtime['worker'] = asyncio.create_task(event_worker(runtime))
+            runtime['close_ms'] = getattr(arguments, 'close_ms', None)
+            if config.get('resident', True):
+                runtime['worker'] = asyncio.create_task(event_worker(runtime))
             try:
+                if not config.get('resident', True):
+                    await recover(runtime)
+                    if arguments.action == 'cancel':
+                        result = await cancel(runtime, arguments.signal_id)
+                    else:
+                        result = await maintain_routine(runtime, reconcile)
+                        if arguments.action == 'run' and 'refused' not in result:
+                            result = await submit(runtime, Path(arguments.envelope).read_text())
+                    print(json.dumps(result))
+                    return
+                if arguments.action == 'wake':
+                    print(json.dumps({'refused': 'resident_executor'}))
+                    return
                 if arguments.action == 'cancel':
                     await recover(runtime)
                     print(json.dumps(await cancel(runtime, arguments.signal_id)))
@@ -312,7 +341,9 @@ async def main(arguments):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='desk/config.json')
+    parser.add_argument('--close-ms', type=int)
     commands = parser.add_subparsers(dest='action', required=True)
+    commands.add_parser('wake')
     command = commands.add_parser('cancel')
     command.add_argument('signal_id')
     command = commands.add_parser('run')

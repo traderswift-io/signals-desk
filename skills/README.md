@@ -10,6 +10,6 @@ The TraderSwift demo desk uses five skills, one per bot. Install each complete `
 | Executor | [signals-execution](signals-execution/SKILL.md) | Generate its delegate key, execute eligible intents and cancel through the shared client. |
 | Reviewer | [signals-review](signals-review/SKILL.md) | Report recorded fills, slippage and stop mode. |
 
-The signal publisher supplies the subscriber token. Only the Executor holds the delegate seed and door access credential. A policy preview does not authorize bypassing execution checks; routine-driven entries remain disabled until resting stop support is implemented. No skill implements its own sizing, policy or signing path.
+The signal publisher supplies the subscriber token. Only the Executor holds the delegate seed and door access credential. A policy preview does not authorize bypassing execution checks; routine-driven entries require a bracket, and every routine starts with `desk_wake`. Brackets need a Signer release that signs the bracket kind; until then the signer refuses the kind and the desk records `bracket_refused`. No skill implements its own sizing, policy or signing path.
 
 The skill layout derives from the upstream project; see [ATTRIBUTION.md](../ATTRIBUTION.md) and [LICENSE](../LICENSE).
