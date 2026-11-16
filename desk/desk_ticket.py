@@ -5,6 +5,7 @@ from pathlib import Path
 
 import aiohttp
 
+from .desk_bracket import entry_candle_guard, wake_close_refusal
 from .desk_io import entry_preview, load_config
 from .desk_record import latest_tickets, now_ms, read_records, signed_today
 from .desk_risk_gate import evaluate_intent
@@ -22,7 +23,12 @@ async def ticket_result(arguments):
                    if row['event'] == 'review' and row['key'] == tickets[-1]['key']]
         return reviews[-1] if reviews else {'refused': 'review_unavailable'}
     async with aiohttp.ClientSession() as session:
-        runtime = {'config': config, 'session': session, 'asset_indices': {}}
+        runtime = {'config': config, 'session': session, 'asset_indices': {},
+                   'close_ms': getattr(arguments, 'close_ms', None)}
+        if arguments.action == 'gate' and not config.get('resident', True):
+            refusal = wake_close_refusal(runtime['close_ms'])
+            if refusal:
+                return {'refused': refusal}
         signal = parse_signal(Path(arguments.input).read_text(), await refresh_meta(runtime), now_ms())
         if signal.get('kind') == 'cancel':
             return {'refused': 'not_an_entry_signal'}
@@ -31,6 +37,8 @@ async def ticket_result(arguments):
             return sized
         reason = evaluate_intent(intent, config['policy'], runtime['asset_indices'],
                                  signed_today(runtime['config'], signal['asset']), now_ms(), signal['reply_by'])
+        if not reason and not config.get('resident', True):
+            reason = await entry_candle_guard(runtime, signal)
         return {**({'refused': reason} if reason else {'status': 'PASS'}), 'sizing': sized, 'intent': intent}
 
 
@@ -45,6 +53,7 @@ async def main(arguments):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='desk/config.json')
+    parser.add_argument('--close-ms', type=int)
     commands = parser.add_subparsers(dest='action', required=True)
     for action in ('size', 'gate', 'review'):
         command = commands.add_parser(action)

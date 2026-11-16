@@ -83,7 +83,22 @@ async def coordinator_intent(request):
     if state.get('rate_exit') and intent.get('reduce_only'):
         state['rate_exit'] = False
         return web.Response(status=429, headers={'Retry-After': '0.01'})
-    if intent['kind'] == 'cancel':
+    if intent['kind'] == 'bracket':
+        if state.get('bracket_refusal'):
+            return web.json_response({'signed': False, 'reason': state['bracket_refusal']})
+        entry = intent['entry']
+        assert entry['tif'] == 'Gtc' and not entry['reduce_only']
+        state['orders'].append({'coin': entry['asset'], 'oid': 42, 'sz': entry['size'],
+                                'reduceOnly': False, 'isTrigger': False})
+        statuses = [{'resting': {'oid': 42}}]
+        for index, name in enumerate(('stop', 'take_profit'), 43):
+            if name in intent:
+                leg = intent[name]
+                assert leg['reduce_only'] and leg['is_market']
+                state['orders'].append({'coin': leg['asset'], 'oid': index, 'sz': leg['size'],
+                                        'reduceOnly': True, 'isTrigger': True})
+                statuses.append({'resting': {'oid': index}})
+    elif intent['kind'] == 'cancel':
         state['orders'] = [order for order in state['orders'] if order['oid'] != intent['oid']]
         statuses = ['success']
     elif state.get('signed_failure'):
@@ -138,8 +153,11 @@ async def info(request):
         if state.get('oracle_down'):
             return web.Response(status=503)
         result = [current_meta, [{'markPx': state.get('mark', '100000'), 'oraclePx': '100001'} for asset in current_meta['universe']]]
-    elif kind == 'openOrders':
+    elif kind in ('openOrders', 'frontendOpenOrders'):
         result = [order for order in state['orders'] if (order['coin'].split(':')[0] if ':' in order['coin'] else '') == dex]
+    elif kind == 'candleSnapshot':
+        start = body['req']['startTime']
+        result = [{'t': start, 'T': start + 899999, 'c': state.get('candle_close', '100000')}]
     elif kind == 'userFills':
         result = state['fills']
     elif kind == 'clearinghouseState':

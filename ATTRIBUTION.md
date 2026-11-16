@@ -14,7 +14,7 @@ The retained repository layout and skill structure, and every file not listed un
 - The `desk/` Python runtime, configuration example, documentation and scenario checks implement and document the signal consumer, sizing, policy checks, delegate execution and review.
 - Removed unused upstream packaging and plugin manifests, release tooling and workflows, installation and product documentation, role-oriented skills, market research utilities and their tests, approval hooks and rules, public bot template, issue templates and promotional assets; also removed the broken notes symlink.
 - Orders are not signed with a local API wallet. They are sent to Signer, which signs under an on-chain policy.
-- The approval model differs from the original: an order is signed only when it meets the delegate's on-chain policy on signer-1 (asset caps, daily size, expiry), evaluated by the signer set; there is no local wallet and no human click per order. For that reason, and as the original's authors ask of such forks, this project has its own name.
+- The approval model differs from the original: an order is signed only when it meets the delegate's on-chain Signer policy (asset caps, daily size, expiry), evaluated by the signer set; there is no local wallet and no human click per order. For that reason, and as the original's authors ask of such forks, this project has its own name.
 
 ## Our changes
 

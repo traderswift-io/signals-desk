@@ -5,6 +5,8 @@ from pathlib import Path
 
 import aiohttp
 
+from .desk_bracket import signal_bracket
+from .desk_wake import validate_symbols
 from .desk_record import now_ms
 from .desk_position_sizer import asset_metadata, size_position
 from .signer_delegate_client import account_state, cancel_fields, market_context, order_fields as build_order, price_text, read_info, signing_key
@@ -23,6 +25,9 @@ def load_config(path, require_public_key=False):
         raise ValueError('invalid_exit_band')
     config.setdefault('resident', True)
     config.setdefault('stop_mode', 'software')
+    config.setdefault('bracket_slippage_bps', '50')
+    config.setdefault('symbols', {})
+    validate_symbols(config['symbols'])
     if not isinstance(config['resident'], bool):
         raise ValueError('invalid_resident')
     if config['stop_mode'] not in ('software', 'trigger'):
@@ -79,10 +84,14 @@ async def entry_preview(runtime, signal):
     config = runtime['config']
     metadata, context, local_index = await market_context(runtime, signal['asset'])
     account = await account_state(runtime, signal['asset'])
+    if not config.get('resident', True):
+        signal_bracket(config, signal, '1', int(metadata['universe'][local_index]['szDecimals']))
     sized = size_position(signal, account['marginSummary']['accountValue'], context['markPx'],
                           asset_metadata(metadata, local_index), config['risk_fraction'], config['leverage_cap'])
     entry = price_text(Decimal(signal['levels']['entry']), int(metadata['universe'][local_index]['szDecimals']), signal['side'] == 'long')
     fields = order_fields(signal, sized['size'], entry)
+    if not config.get('resident', True):
+        fields = signal_bracket(config, signal, sized['size'], int(metadata['universe'][local_index]['szDecimals']))
     intent = {**fields, 'expires_at': now_ms() // 1000 + 120,
               'venue': 'hyperliquid', 'vault_address': config['vault_address'], 'policy_epoch': config['policy']['epoch']}
     return sized, fields, intent, account

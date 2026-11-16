@@ -198,12 +198,13 @@ async def check_ticket_local():
         runtime = create_runtime({**config, 'resident': False}, None)
         with (patch('desk.desk_executor.refresh_meta', AsyncMock(return_value=meta())),
               patch('desk.desk_executor.run_round', AsyncMock()) as coordinator,
-              patch('desk.desk_executor.entry_preview', AsyncMock(side_effect=AssertionError('Nonresident entry reached sizing'))),
+              patch('desk.desk_executor.entry_candle_guard', AsyncMock(return_value=None)),
+              patch('desk.desk_executor.entry_preview', AsyncMock(side_effect=ValueError('trigger_price_outside_band'))),
               patch('desk.desk_executor.arm', AsyncMock()) as watcher):
             for stop_mode in ('software', 'trigger'):
                 runtime['config']['stop_mode'] = stop_mode
                 result = await submit(runtime, signal_envelope(stop_mode))
-                assert result == {'refused': 'no_resting_stop_until_rotation'}
+                assert result == {'refused': 'trigger_price_outside_band'}
             coordinator.assert_not_awaited()
             watcher.assert_not_awaited()
         rows = read_records(config['record_path'])
