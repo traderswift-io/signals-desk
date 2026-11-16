@@ -5,11 +5,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from .desk_deliveries import finish_deliveries, prepare_deliveries, queue_delivery, schedule_delivery
-from .desk_executor import create_runtime, event_worker, recover, shutdown
+from .desk_executor import cancel, create_runtime, event_worker, recover, shutdown
 from .desk_record import append_record, delivery_path, now_ms, pending_deliveries, read_records
 from .desk_scenarios_deliveries import entry, fixture, posted, rows, settle
 from .desk_scenarios_fakes import signal_envelope
 from .desk_scenarios_redis import stream_fields
+from .desk_scenarios_resident import finish_exit
 
 
 async def check_endpoints():
@@ -53,7 +54,9 @@ async def check_disabled_recovery():
             restarted['worker'] = asyncio.create_task(event_worker(restarted))
             try:
                 await recover(restarted)
-                assert trading['position'] == 0
+                assert trading['position'] != 0
+                await cancel(restarted, 'open')
+                await finish_exit(restarted, trading, restarted['tickets']['open'], '100000')
                 await entry(restarted, 'next', asset='BTC', entry_id='2-0')
                 assert rows(restarted, 'consumed')[-1]['result'] == {'state': 'filled'}
                 assert posted(state) == ['1-0']
@@ -211,7 +214,7 @@ async def check_task_errors():
 
 async def check_odd_timestamps():
     for enabled in (True, False):
-        async with fixture() as (runtime, state, _):
+        async with fixture() as (runtime, state, trading):
             if not enabled:
                 runtime.pop('deliveries')
                 runtime['config'].pop('signals_url')
@@ -227,7 +230,8 @@ async def check_odd_timestamps():
                 fields['ts'] = timestamp
                 await entry(runtime, signal_id, fields=fields, entry_id=f'{index}-1')
                 await settle(runtime)
-                assert rows(runtime, 'consumed')[-1]['result'] == {'state': 'exited'}
+                assert rows(runtime, 'consumed')[-1]['result'] == {'state': 'filled'}
+                await finish_exit(runtime, trading, runtime['tickets'][signal_id], '100000')
             assert not rows(runtime, 'stream_refusal')
             assert len(state['posts']) == (6 if enabled else 0)
 

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from .desk_anchor_verify import canonical, main as verify_main
 from .desk_executor import cancel, submit
+from .desk_scenarios_resident import finish_exit
 from .desk_record import append_record, read_records, signed_today
 from .desk_scenarios_anchor import CONFIG, PATHS, responses, transport
 from .desk_scenarios_bracket import check_resident, command_result, envelope, fixture
@@ -355,8 +356,9 @@ async def check_ambiguous_journal_results():
             assert reply['signed'] is None and reply['ambiguous'] is True
             assert signed_today(runtime['config'], 'BTC') == Decimal('0.01')
             if resident:
-                assert await cancel(runtime, 'sample') == {'state': 'exited'}
-                assert fake['position'] == 0 and len(fake['intents']) == 2
+                assert await cancel(runtime, 'sample') == {'state': 'filled'}
+                await finish_exit(runtime, fake, runtime['tickets']['sample'], '100000')
+                assert fake['position'] == 0 and not fake['orders']
             else:
                 outcome = next(row['outcome'] for row in rows if row['event'] == 'bracket_result')
                 assert outcome['signed'] is None and outcome['ambiguous'] is True

@@ -18,6 +18,7 @@ def queue_event(runtime, ticket, event):
 async def connect_watcher(runtime, ticket):
     ticket['websocket'] = await runtime['session'].ws_connect(runtime['config']['websocket_url'], heartbeat=10, receive_timeout=30)
     for subscription in ({'type': 'trades', 'coin': ticket['signal']['asset']},
+                         {'type': 'l2Book', 'coin': ticket['signal']['asset']},
                          {'type': 'userFills', 'user': runtime['config']['vault_address']}):
         await ticket['websocket'].send_json({'method': 'subscribe', 'subscription': subscription})
     subscriptions = set()
@@ -27,13 +28,13 @@ async def connect_watcher(runtime, ticket):
         payload = json.loads(message.data)
         if payload.get('channel') == 'subscriptionResponse':
             subscription = payload.get('data', {}).get('subscription', {})
-            if subscription.get('type') == 'trades' and subscription.get('coin') == ticket['signal']['asset']:
-                subscriptions.add('trades')
+            if subscription.get('type') in ('trades', 'l2Book') and subscription.get('coin') == ticket['signal']['asset']:
+                subscriptions.add(subscription['type'])
             if subscription.get('type') == 'userFills' and subscription.get('user') == runtime['config']['vault_address']:
                 subscriptions.add('userFills')
-            if subscriptions == {'trades', 'userFills'}:
+            if subscriptions == {'trades', 'l2Book', 'userFills'}:
                 return
-        elif payload.get('channel') in ('trades', 'userFills'):
+        elif payload.get('channel') in ('trades', 'l2Book', 'userFills'):
             queue_event(runtime, ticket, payload)
     raise ValueError('watcher_not_alive')
 
@@ -56,11 +57,12 @@ async def websocket_reconnect(runtime, ticket):
                     if message.type != aiohttp.WSMsgType.TEXT:
                         break
                     payload = json.loads(message.data)
-                    if payload.get('channel') in ('trades', 'userFills'):
+                    if payload.get('channel') in ('trades', 'l2Book', 'userFills'):
                         queue_event(runtime, ticket, payload)
             except (aiohttp.ClientError, ValueError, TimeoutError):
                 pass
             ticket['alive'] = False
+            ticket.pop('book', None)
             await ticket['websocket'].close()
             append_record(runtime['config']['record_path'], 'watcher_disconnected', key=ticket['key'])
             restarted = True

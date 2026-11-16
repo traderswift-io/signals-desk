@@ -301,7 +301,7 @@ async def check_ticket_preview_local():
                 recorded = [row for row in read_records(config['record_path']) if row['event'] == 'gate'][-1]
                 assert outputs['size'] == outputs['gate']['sizing'] == recorded['sizing']
                 assert outputs['gate']['refused'] == result['refused'] == recorded['reason']
-                assert outputs['gate']['intent']['limit_px'] == recorded['entry_price']
+                assert outputs['gate']['intent']['entry']['limit_px'] == recorded['entry_price']
                 assert {**outputs['gate']['intent'], 'expires_at': recorded['intent']['expires_at']} == recorded['intent']
                 if case == 'budget':
                     assert result['refused'] == 'over_max_daily_size'

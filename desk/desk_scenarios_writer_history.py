@@ -14,6 +14,8 @@ from .desk_executor import process_event, submit
 from .desk_journal_schema import EVENT_FIELDS
 from .desk_record import read_records
 from .desk_scenarios_bracket import envelope, fixture, main as bracket_scenarios
+from .desk_scenarios_exit_algo import main as exit_scenarios
+from .desk_scenarios_exit_by import main as time_stop_scenarios
 from .desk_scenarios_budget_identity import check_budget_releases
 from .desk_scenarios_delivery_recovery import check_recovery
 from .desk_scenarios_fakes import record_anchor_fixture
@@ -141,6 +143,8 @@ async def collect_writer_histories():
                     stack.enter_context(patch.object(module, name, record))
         stack.enter_context(patch.object(desk_delivery_store, 'write_row', delivery_record))
         await bracket_scenarios()
+        await exit_scenarios()
+        await time_stop_scenarios()
         await check_budget_releases()
         await check_recovery()
         await diagnostic_histories()

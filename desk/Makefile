@@ -6,6 +6,11 @@ check:
 	cd .. && python3 -B -m desk.desk_scenarios_journal
 	cd .. && python3 -B -m desk.desk_scenarios_history
 	cd .. && python3 -B -m desk.desk_scenarios_execution_history
+	cd .. && python3 -B -m desk.desk_scenarios_exit_by
+	cd .. && python3 -B -m desk.desk_scenarios_exit_custody
+	cd .. && python3 -B -m desk.desk_scenarios_exit_upgrade
+	cd .. && python3 -B -m desk.desk_scenarios_exit_deadline
+	cd .. && python3 -B -m desk.desk_scenarios_exit_algo
 	cd .. && python3 -B -m desk.desk_scenarios_bracket
 	cd .. && python3 -B -m desk.desk_scenarios
 	cd .. && python3 -B -m desk.desk_scenarios_anchor

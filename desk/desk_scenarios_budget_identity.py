@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from .desk_executor import cancel, recover, submit
+from .desk_scenarios_resident import finish_exit
 from .desk_record import append_record, now_ms, read_records, signed_today
 from .desk_scenarios_anchor_gate import verify_fixture
 from .desk_scenarios_bracket import command_result, envelope, fixture
@@ -266,10 +267,12 @@ async def check_budget_releases():
             assert await submit(runtime, envelope('rate-exit')) == {'state': 'filled'}
         fake['rate_exit'] = True
         with patch('desk.signer_delegate_client.coordinator_backoff', AsyncMock()):
-            assert await cancel(runtime, 'rate-exit') == {'state': 'exited'}
+            assert await cancel(runtime, 'rate-exit') == {'state': 'filled'}
+            await finish_exit(runtime, fake, runtime['tickets']['rate-exit'], '100000')
         rows = read_records(runtime['config']['record_path'])
         replies = [row for row in rows if row['event'] == 'reply']
-        assert [row['signed'] for row in replies] == [True, False, True]
+        assert [row['signed'] for row in replies[:3]] == [True, False, True]
+        assert all(row['signed'] is True for row in replies[3:])
         assert replies[1]['request_id'] == replies[2]['request_id']
         assert signed_today(runtime['config'], 'BTC') == Decimal('0.01')
     async with fixture() as (runtime, fake):

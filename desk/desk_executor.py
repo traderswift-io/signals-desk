@@ -8,12 +8,14 @@ import aiohttp
 
 from .desk_anchor_verify import anchor_refusal, decode_json
 from .desk_bracket import entry_candle_guard
-from .desk_routine import bracket_result, maintain_routine, recover_routine
+from .desk_exit_algo import book_context
+from .desk_exit_driver import drive_exit
+from .desk_routine import bracket_result, close_routine, maintain_routine, recover_routine
 from .desk_coordinator import run_round
-from .desk_io import entry_preview, load_config, order_fields
-from .desk_private_storage import prepare_private_storage
-from .signer_delegate_client import account_state, cancel_fields, create_client, dex_fields, market_context, price_text, read_info, reconcile_asset, refresh_meta, resolve_symbol
+from .desk_io import entry_preview, load_config
+from .signer_delegate_client import account_state, create_client, dex_fields, market_context, order_statuses, read_info, reconcile_asset, refresh_meta
 from .desk_record import already_acted, append_record, journal_guard, latest_tickets, now_ms, review, set_state, signed_today, ticket_key, writer_lock
+from .desk_private_storage import prepare_private_storage
 from .desk_risk_gate import evaluate_intent
 from .desk_signal import parse_signal
 from .desk_watcher import arm, disarm
@@ -54,42 +56,16 @@ async def refuse(runtime, ticket, reason):
 
 
 async def close_ticket(runtime, ticket, reason, trigger=None):
-    config, signal = runtime['config'], ticket['signal']
-    ticket['closing'] = reason
+    if not runtime['config'].get('resident', True):
+        return await close_routine(runtime, ticket, reason, reconcile, trigger)
+    reason = 'time_stop' if ticket.get('closing') == 'time_stop' else reason
+    if reason == 'time_stop' and ticket.get('closing') != 'time_stop':
+        append_record(runtime['config']['record_path'], 'time_stop', key=ticket['key'])
+    ticket['closing'] = {'cancel': 'withdrawn', 'restart_recovery': 'withdrawn', 'watcher_dead': 'withdrawn'}.get(reason, reason)
+    set_state(runtime['config'], ticket, ticket['state'])
     if reason not in ('stop', 'target'):
         await reconcile(runtime, ticket)
-    for order in ticket['orders']:
-        outcome = await run_round(runtime, ticket, cancel_fields(signal, order['oid']))
-        append_record(config['record_path'], 'cancel_result', key=ticket['key'], outcome=outcome)
-        await reconcile(runtime, ticket)
-        if any(current['oid'] == order['oid'] for current in ticket['orders']):
-            return {'refused': outcome.get('reason', 'cancel_unconfirmed')}
-    while ticket['position']:
-        buy = ticket['position'] < 0
-        if trigger is None:
-            _, context, _ = await market_context(runtime, signal['asset'])
-            reference = Decimal(context['markPx'])
-        else:
-            reference = Decimal(trigger)
-        asset = resolve_symbol(signal['asset'], runtime['meta'])
-        band = Decimal(config['exit_band'])
-        price = price_text(reference * (1 + band if buy else 1 - band), int(asset['szDecimals']), buy)
-        fields = {**order_fields(signal, abs(ticket['position']), price, True), 'is_buy': buy}
-        outcome = await run_round(runtime, ticket, fields)
-        append_record(config['record_path'], 'exit_result', key=ticket['key'], reason=reason, outcome=outcome)
-        await reconcile(runtime, ticket)
-        trigger = None
-        if outcome.get('ambiguous') and ticket['position']:
-            ticket['uncertain'] = True
-            return {'refused': 'ambiguous_exit_held'}
-        if not outcome.get('signed'):
-            return {'refused': outcome.get('reason', 'exit_refused')}
-    if ticket.get('uncertain'):
-        return {'refused': 'ambiguous_entry_held'}
-    set_state(config, ticket, 'exited', reason=reason)
-    review(config, ticket)
-    await disarm(ticket)
-    return {'state': 'exited'}
+    return {'state': ticket['state']}
 
 
 async def submit(runtime, envelope):
@@ -146,7 +122,7 @@ async def submit(runtime, envelope):
             with journal_guard(config) as refusal:
                 budget = signed_today(config, signal['asset'])
                 reason = evaluate_intent(gate_intent, config['policy'], runtime['asset_indices'], budget,
-                                         now_ms(), signal['reply_by'])
+                                         now_ms(), signal['reply_by'], signal.get('exit_by'))
             if refusal:
                 return refusal
             append_record(config['record_path'], 'gate', key=key, reason=reason, sizing=sized,
@@ -168,21 +144,33 @@ async def submit(runtime, envelope):
                     return await refuse(runtime, ticket, 'account_not_flat')
             if config.get('resident', True):
                 await arm(runtime, ticket)
+            ticket['backstop_px'] = fields['stop']['trigger_px']
+            set_state(config, ticket, ticket['state'])
             outcome = await run_round(runtime, ticket, fields)
             if not config.get('resident', True):
                 if outcome.get('reason') == 'anchor_not_verified':
                     return {'refused': 'anchor_not_verified'}
                 return await bracket_result(runtime, ticket, outcome, reconcile)
+            if outcome.get('reason') == 'anchor_not_verified':
+                return {'refused': 'anchor_not_verified'}
+            if outcome.get('signed') is False:
+                append_record(config['record_path'], 'bracket_refused', key=key, reason=outcome.get('reason', 'bracket_refused'))
+                return await refuse(runtime, ticket, outcome.get('reason', 'bracket_refused'))
+            append_record(config['record_path'], 'bracket_result', key=key, request_id=outcome['intent']['request_id'], outcome=outcome)
             if outcome.get('ambiguous'):
                 ticket['uncertain'] = True
             await reconcile(runtime, ticket)
+            if any(isinstance(status, dict) and 'error' in status for status in order_statuses(outcome)) and (ticket['position'] or ticket['orders']):
+                ticket['uncertain'] = True
+                append_record(config['record_path'], 'recovery_required', key=key, reason='bracket_outcome_unresolved')
+                return {'state': ticket['state'], 'reason': 'bracket_outcome_unresolved'}
             if ticket['position']:
                 ticket['uncertain'] = False
                 if not ticket['alive']:
                     return await close_ticket(runtime, ticket, 'watcher_dead')
                 if now_ms() >= (config['policy']['expires_at'] - 60) * 1000:
                     return await close_ticket(runtime, ticket, 'expiry')
-                return {'state': ticket['state']}
+                return await drive_exit(runtime, ticket, reconcile)
             if ticket['orders'] or ticket.get('uncertain'):
                 return {'state': ticket['state'], 'reason': 'reconciliation_hold'}
             if outcome.get('signed'):
@@ -222,19 +210,25 @@ async def process_event(runtime, ticket, event):
         if event.get('channel') in ('userFills', 'coordinator_reply', 'watcher_restarted'):
             await reconcile(runtime, ticket)
         signal = ticket['signal']
+        if event.get('channel') == 'l2Book' and event.get('data', {}).get('coin') == signal['asset']:
+            ticket['book'] = event['data']
         if ticket['position']:
             ticket['uncertain'] = False
         reason = ticket.get('closing')
         trigger = None
         if not ticket['alive']:
             reason = 'watcher_dead'
-        elif ticket['position'] and now_ms() >= (runtime['config']['policy']['expires_at'] - 60) * 1000:
+        elif now_ms() >= (runtime['config']['policy']['expires_at'] - 60) * 1000:
             reason = 'expiry'
         trades = event.get('data', []) if event.get('channel') == 'trades' else []
         if event.get('channel') == 'watcher_restarted':
             append_record(runtime['config']['record_path'], 'watcher_restarted', key=ticket['key'])
             _, context, _ = await market_context(runtime, signal['asset'])
             trades = [{'coin': signal['asset'], 'px': context['markPx']}]
+        if event.get('channel') == 'l2Book' and ticket.get('book'):
+            context = book_context(ticket['book'], {'size': str(ticket['position'])}, runtime['config'])
+            if context:
+                trades = [{'coin': signal['asset'], 'px': str(context['mid'])}]
         if ticket['position']:
             for trade in trades:
                 if trade.get('coin') != signal['asset']:
@@ -246,14 +240,18 @@ async def process_event(runtime, ticket, event):
                 long_side = signal['side'] == 'long'
                 if price <= stop if long_side else price >= stop:
                     ticket['stop_hit'], reason, trigger = True, 'stop', stop
-                elif target is not None and (price >= Decimal(target) if long_side else price <= Decimal(target)):
+                elif reason not in ('stop', 'expiry', 'withdrawn') and target is not None and (price >= Decimal(target) if long_side else price <= Decimal(target)):
                     reason, trigger = 'target', target
+        if (signal.get('exit_by') is not None
+                and event.get('channel') in ('trades', 'watcher_restarted') and now_ms() >= signal['exit_by']):
+            reason = 'time_stop'
+        if ticket.get('closing') == 'time_stop':
+            reason = 'time_stop'
+        if event.get('channel') not in ('trades', 'l2Book', 'userFills', 'watcher_restarted'):
+            return
         if reason:
             await close_ticket(runtime, ticket, reason, trigger)
-        elif ticket['state'] == 'filled' and not ticket['position'] and not ticket['orders']:
-            set_state(runtime['config'], ticket, 'exited', reason='venue_flat')
-            review(runtime['config'], ticket)
-            await disarm(ticket)
+        await drive_exit(runtime, ticket, reconcile)
 
 
 async def event_worker(runtime):
@@ -277,6 +275,10 @@ async def recover(runtime):
                 continue
             ticket = {'key': list(key), 'signal': row['signal'], 'claimed_at': row.get('claimed_at', row['timestamp']), 'state': row['state'],
                       'fill_price': row.get('fill_price'), 'stop_hit': row.get('stop_hit', False),
+                      'entry_done': row.get('entry_done', False),
+                      'close_ms': row.get('close_ms'),
+                      **{name: row.get(name) for name in ('backstop_px', 'closing', 'last_exit_action_ms',
+                                                        'exit_action_cost', 'action_budget_low', 'exit_fast')},
                       'position': Decimal(0), 'orders': [], 'alive': False, 'done': asyncio.Event()}
             runtime['tickets'][key[2]] = ticket
             try:
@@ -284,10 +286,13 @@ async def recover(runtime):
             except (ValueError, aiohttp.ClientError, TimeoutError):
                 ticket['alive'] = False
             await reconcile(runtime, ticket)
+            if ticket.get('backstop_px') is None and (ticket['position'] or ticket['orders']):
+                await close_ticket(runtime, ticket, 'restart_recovery')
+                await drive_exit(runtime, ticket, reconcile)
             if row['state'] == 'sent' and not ticket['position'] and not ticket['orders']:
                 ticket['uncertain'] = True
-            await close_ticket(runtime, ticket, 'restart_recovery')
-
+            if not ticket['orders'] and not ticket['position'] and ticket.get('entry_done'):
+                await drive_exit(runtime, ticket, reconcile)
 
 async def shutdown(runtime):
     for ticket in runtime['tickets'].values():
@@ -295,7 +300,6 @@ async def shutdown(runtime):
     if runtime.get('worker'):
         runtime['worker'].cancel()
         await asyncio.gather(runtime['worker'], return_exceptions=True)
-
 
 async def control_connection(runtime, reader, writer):
     try:

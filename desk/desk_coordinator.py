@@ -12,20 +12,21 @@ async def run_round(runtime, ticket, fields):
     def gate(intent):
         with journal_guard(config) as refusal:
             reason = evaluate_intent(intent, config['policy'], runtime['asset_indices'],
-                                     signed_today(config, intent.get('asset')), now_ms(), ticket['signal'].get('reply_by'))
+                                     signed_today(config, intent.get('asset')), now_ms(), ticket['signal'].get('reply_by'),
+                                     ticket['signal'].get('exit_by'))
         return refusal.get('refused') if refusal else reason
 
     async def before_send(body):
         intent = body['intent']
-        if fields['kind'] == 'bracket' and wake_close_refusal(ticket.get('close_ms')):
+        if fields['kind'] == 'bracket' and not config.get('resident', True) and wake_close_refusal(ticket.get('close_ms')):
             return 'stale_wake_close'
         refusal = gate(intent)
         if refusal:
             return refusal
-        if not exit_request and fields['kind'] != 'bracket' and not ticket['alive']:
+        if not exit_request and config.get('resident', True) and not ticket['alive']:
             return 'watcher_not_alive'
         prices = await oracle_prices(runtime, ticket['signal']['asset'], exit_request)
-        if fields['kind'] == 'bracket' and wake_close_refusal(ticket.get('close_ms')):
+        if fields['kind'] == 'bracket' and not config.get('resident', True) and wake_close_refusal(ticket.get('close_ms')):
             return 'stale_wake_close'
         if not exit_request and any(prices.get(source + '_error') not in (None, 'unmapped') for source in ('hl_oracle', 'binance')):
             append_record(config['record_path'], 'oracle_refusal', key=ticket['key'], **prices)
@@ -47,6 +48,8 @@ async def run_round(runtime, ticket, fields):
         signed_today(config, ticket['signal']['asset'])
     if refusal:
         return {'signed': False, 'reason': refusal['refused']}
+    if not exit_request and ticket['signal'].get('exit_by') is not None and now_ms() >= ticket['signal']['exit_by']:
+        return {'signed': False, 'reason': 'exit_by_passed'}
     outcome = await client_round(runtime, fields, before_send=before_send, validate_rearm=gate, on_event=on_event)
     if 'reconciliation' in outcome:
         ticket['reconciliation'] = outcome.pop('reconciliation')

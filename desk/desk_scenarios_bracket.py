@@ -2,6 +2,7 @@ import asyncio
 import io
 from json import dumps, loads
 import tempfile
+import time
 from contextlib import asynccontextmanager, redirect_stdout
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -9,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 from nacl.signing import SigningKey
 
 from .desk_bracket import closed_price
@@ -29,7 +31,7 @@ async def fixture(resident=False):
     with tempfile.TemporaryDirectory() as directory:
         config = configuration(Path(directory), '<fake>')
         config.update(resident=resident, symbols={'BTC': {'active_utc': [['00:00', '24:00']], 'days': 'mon-sun'}})
-        fake = {'prepares': 0, 'nonce': 100, 'intents': [], 'events': [], 'position': Decimal(0),
+        fake = {'resident': resident, 'prepares': 0, 'nonce': 100, 'intents': [], 'events': [], 'position': Decimal(0),
                 'orders': [], 'fills': [], 'websockets': []}
 
         @asynccontextmanager
@@ -37,16 +39,22 @@ async def fixture(resident=False):
             incoming = SimpleNamespace(app={'state': fake}, json=AsyncMock(return_value=json), headers=headers, query=params)
             route = url.rsplit('/', 1)[-1]
             handler = {'info': info, 'prepare': coordinator_prepare, 'intent': coordinator_intent, 'ticker': ticker}[route]
-            response = await handler(incoming)
+            async with asyncio.timeout(timeout.total):
+                response = await handler(incoming)
+            def raise_status():
+                if response.status >= 400:
+                    raise aiohttp.ClientError('fake_status')
             yield SimpleNamespace(status=response.status, headers=response.headers,
-                                  json=AsyncMock(return_value=loads(response.body or '{}')), raise_for_status=lambda: None)
+                                  json=AsyncMock(return_value=loads(response.body) if response.body else None), raise_for_status=raise_status)
 
         session = SimpleNamespace(post=request, get=request)
         with patch('desk.signer_delegate_client.signing_key', return_value=SigningKey.generate()):
             runtime = create_runtime(config, session)
         runtime['close_ms'] = last_close(now_ms())
-        yield runtime, fake
-
+        clock = time.time_ns
+        fixture_clock = runtime['config'].setdefault('fixture_clock', {'now_ms': 0})
+        with patch('time.time_ns', side_effect=lambda: max(clock(), fixture_clock['now_ms'] * 1000000)):
+            yield runtime, fake
 
 async def command_result(runtime, action, value=None, verified=True):
     path = Path(runtime['config']['record_path']).parent / 'envelope.json'
@@ -94,7 +102,6 @@ def wire_action(fields):
                        's': leg['size'], 'r': leg['reduce_only'], 't': order_type})
     return {'type': 'order', 'orders': orders, 'grouping': 'normalTpsl'}
 
-
 async def check_bracket(short=False, target=True):
     async with fixture() as (runtime, fake):
         value = envelope(short=short, target=target)
@@ -120,7 +127,6 @@ async def check_bracket(short=False, target=True):
         await command_result(runtime, 'wake')
         assert len(fake['intents']) == 1 and not fake['websockets']
 
-
 async def check_local_refusal(band=False):
     async with fixture() as (runtime, fake):
         value = envelope()
@@ -141,7 +147,6 @@ async def check_local_refusal(band=False):
     else:
         raise AssertionError('Out-of-band trigger accepted')
 
-
 async def check_signer_refusal():
     reasons = ('unsupported_kind', 'trigger_not_reduce_only', 'bracket_leg_not_reduce_only',
                'bracket_leg_wrong_side', 'bracket_leg_larger_than_entry', 'bracket_leg_wrong_asset',
@@ -155,7 +160,6 @@ async def check_signer_refusal():
             rows = read_records(runtime['config']['record_path'])
             assert any(row['event'] == 'bracket_refused' and row['reason'] == reason for row in rows)
             assert rows[-1]['stop'] == 'bracket'
-
 
 async def check_wake(case):
     async with fixture() as (runtime, fake):
@@ -179,7 +183,6 @@ async def check_wake(case):
             runtime['config']['symbols']['BTC']['days'] = 'tue-fri'
             assert not (await wake_result(runtime, timestamp))['wake']
 
-
 async def check_expired():
     for expiry, partial in ((True, False), (False, False), (True, True)):
         async with fixture() as (runtime, fake):
@@ -201,7 +204,6 @@ async def check_expired():
                 await recover(runtime)
                 assert fake['position'] == Decimal('0.004') and len(fake['intents']) == 2
 
-
 async def check_resident():
     async with fixture(resident=True) as (runtime, fake):
         async def arm(runtime, ticket):
@@ -210,12 +212,13 @@ async def check_resident():
 
         with patch('desk.desk_executor.arm', arm):
             assert await submit_verified_fixture(runtime, envelope()) == {'state': 'filled'}
-        assert fake['intents'][0]['kind'] == 'order' and fake['intents'][0]['tif'] == 'Ioc'
+        intent = fake['intents'][0]
+        assert intent['kind'] == 'bracket' and intent['entry']['tif'] == 'Gtc'
+        assert intent['stop']['trigger_px'] == '98000' and 'take_profit' not in intent
         assert fake['events'].index('watcher_armed') < fake['events'].index('intent')
         await process_event(runtime, runtime['tickets']['bracket'], {'channel': 'trades', 'data': [{'coin': 'BTC', 'px': '98999'}]})
-        assert fake['position'] == 0 and len(fake['intents']) == 2 and fake['intents'][1]['reduce_only']
-        assert read_records(runtime['config']['record_path'])[-1]['stop'] == 'software'
-
+        assert fake['position'] == Decimal('0.01') and len(fake['intents']) == 1
+        assert runtime['tickets']['bracket']['closing'] == 'stop'
 
 async def check_candle_guards():
     async with fixture() as (runtime, fake):
@@ -240,7 +243,6 @@ async def check_candle_guards():
     lines = output.getvalue().splitlines()
     assert len(lines) == 2 and loads(lines[0])['reason'] == 'wake_unavailable'
     assert lines[1].startswith('WAKE | no | wake_unavailable | next_close_utc=')
-
 
 async def check_later_flat_cleanup():
     for refused_order in (None, 42, 43):
@@ -285,7 +287,6 @@ async def check_later_flat_cleanup():
                 assert any(row['outcome'].get('reason') == 'cancel_refused' for row in cancellations) == bool(refused_order)
                 await maintain_routine(runtime, reconcile)
                 assert await submit_verified_fixture(runtime, envelope('next')) == {'state': 'sent'}
-
 
 async def check_wake_close_handoff():
     timestamp = int(datetime(2026, 11, 16, 12, 16, tzinfo=timezone.utc).timestamp() * 1000)
@@ -337,7 +338,6 @@ async def check_wake_close_handoff():
                 assert result == {'state': 'bracket_refused', 'reason': 'stale_wake_close'}, result
             assert fake['prepares'] == 1 and not fake['intents']
 
-
 async def check_maintenance_close_boundary():
     timestamp = int(datetime(2026, 11, 16, 12, 29, 59, tzinfo=timezone.utc).timestamp() * 1000)
     for price in ('98999', '100000'):
@@ -368,7 +368,6 @@ async def check_maintenance_close_boundary():
                 candles = [row['req'] for row in fake['info_requests'] if row['type'] == 'candleSnapshot']
                 assert all(row['endTime'] == close for row in candles)
 
-
 async def main():
     await check_candle_guards()
     cases = [('long bracket: three ordered legs', lambda: check_bracket()),
@@ -381,7 +380,7 @@ async def main():
              ('resting entry in active hours: wake', lambda: check_wake('resting')),
              ('position outside active hours: no wake', lambda: check_wake('closed')),
              ('expired or invalidated entry: cancel, retain partial-fill protection', check_expired),
-             ('resident IOC and software exit unchanged', check_resident),
+             ('resident bracket and event-driven exit custody', check_resident),
              ('later flat cleanup: persisted entry cancel and refused-leg retry', check_later_flat_cleanup),
              ('wake close handoff: stale submission refused', check_wake_close_handoff),
              ('maintenance close boundary: stale candle refuses without cancellation', check_maintenance_close_boundary),

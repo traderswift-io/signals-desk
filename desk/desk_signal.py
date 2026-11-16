@@ -46,6 +46,13 @@ def parse_signal(envelope, meta, now_ms):
         raise ValueError('missing_confidence')
     if not 0 <= decimal_number(payload['confidence'], 'confidence') <= 1:
         raise ValueError('invalid_confidence')
+    exit_by = payload.get('exit_by')
+    if exit_by is not None:
+        published_at = payload.get('published_at')
+        if type(exit_by) is not int or type(published_at) is not int or exit_by <= published_at:
+            raise ValueError('invalid_exit_by')
+        if exit_by <= now_ms:
+            raise ValueError('exit_by_passed')
     reply_by = payload.get('reply_by')
     if not isinstance(reply_by, int) or isinstance(reply_by, bool):
         raise ValueError('missing_or_invalid_reply_by')

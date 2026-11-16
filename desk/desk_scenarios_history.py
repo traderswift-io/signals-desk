@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from .desk_journal_schema import EVENT_FIELDS
+from .desk_exit_pacing import MAX_STATE_TIMESTAMP, STATE_INTEGER_LIMITS
 from .desk_record import read_records, signed_today
 from .desk_scenarios_bracket import envelope, fixture
 from .desk_scenarios_budget_identity import spent_journal
@@ -39,6 +40,25 @@ def replace_field(rows, index, keys, replacement):
         target = target[name]
     target[keys[-1]] = replacement
     return serialize(changed)
+
+
+def integer_boundaries(rows, index):
+    row = rows[index]
+    neighbours = [item for item in rows if item['event'] == 'state' and item['key'] == row['key']]
+    position = sum(item['event'] == 'state' and item['key'] == row['key'] for item in rows[:index])
+    previous = dict(nested_fields(neighbours[position - 1])) if position else {}
+    following = dict(nested_fields(neighbours[position + 1])) if position + 1 < len(neighbours) else {}
+    for keys, original in nested_fields(row):
+        if type(original) is not int:
+            continue
+        maximum = STATE_INTEGER_LIMITS.get(keys[0], MAX_STATE_TIMESTAMP) if len(keys) == 1 else MAX_STATE_TIMESTAMP
+        replacements = {0, maximum + 1, 10 ** 30, row['timestamp'] + 1}
+        for values, offset in ((previous, -1), (following, 1)):
+            value = values.get(keys, original)
+            if type(value) is int:
+                replacements.add(value + offset)
+        for replacement in sorted(replacements - {original}):
+            yield keys, replacement
 
 
 async def require_corruption(runtime, fake, value, contents, initial_fake, label):
@@ -87,7 +107,8 @@ async def check_history_consistency():
 
 def legal_replacement(row, keys, replacement):
     nullable = {'fill_price', 'slippage', 'close_ms', 'entry_cancel_reason', 'hl_oracle_px',
-                'hl_oracle_timestamp', 'binance_px', 'binance_timestamp', 'signed', 'venue_answer'}
+                'hl_oracle_timestamp', 'binance_px', 'binance_timestamp', 'signed', 'venue_answer',
+                'backstop_px', 'closing', 'last_exit_action_ms', 'exit_action_cost', 'action_budget_low', 'exit_fast', 'exit_by'}
     if replacement is None:
         return (keys[-1] in nullable or keys[-1] == 'target'
                 or keys == ('reason',) and row['event'] == 'gate'
@@ -95,6 +116,10 @@ def legal_replacement(row, keys, replacement):
     original = row
     for key in keys:
         original = original[key]
+    if keys in (('action_budget_low',), ('exit_fast',)) and type(replacement) is bool:
+        return True
+    if keys in (('last_exit_action_ms',), ('exit_action_cost',)) and type(replacement) is int:
+        return False
     if (keys[-1] in ('close_ms', 'hl_oracle_timestamp', 'binance_timestamp')
             and type(replacement) is int):
         return True

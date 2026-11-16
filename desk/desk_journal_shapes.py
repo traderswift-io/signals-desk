@@ -72,6 +72,10 @@ def validate_state_record(record):
             require_decimal(signal['levels'][name])
     if 'published_at' in signal:
         require_fields(signal, {'published_at': int})
+    if signal.get('exit_by') is not None:
+        require_fields(signal, {'exit_by': int, 'published_at': int})
+        if signal['exit_by'] <= signal['published_at']:
+            raise ValueError('journal_corrupt')
     optional_fields(signal, {'kind': str, 'symbol': str, 'venue_symbol': str, 'venue_hint': str,
                              'invalidation': str, 'thesis': str, 'horizon': str, 'links': list, 'raw': str},
                     empty_strings=('raw', 'thesis', 'horizon'))
@@ -124,7 +128,9 @@ def validate_trigger_fields(intent, name):
 def validate_order_fields(intent):
     require_fields(intent, {'kind': str, 'asset': str, 'asset_index': int, 'is_buy': bool,
                             'reduce_only': bool, 'tif': str, 'size': str, 'limit_px': str})
-    if intent['kind'] != 'order' or intent['tif'] not in ('Ioc', 'Gtc'):
+    if intent['kind'] != 'order' or intent['tif'] not in ('Ioc', 'Gtc', 'Alo'):
+        raise ValueError('journal_corrupt')
+    if intent['tif'] == 'Alo' and not intent['reduce_only']:
         raise ValueError('journal_corrupt')
     for name in ('size', 'limit_px'):
         require_decimal(intent.get(name))
@@ -133,7 +139,7 @@ def validate_order_fields(intent):
 def validate_intent_record(record):
     intent = record.get('intent')
     require_fields(intent, {'request_id': str, 'kind': str, 'delegate_key': str, 'key_ref': str})
-    if intent['kind'] not in ('order', 'bracket', 'cancel', 'schedule_cancel'):
+    if intent['kind'] not in ('order', 'bracket', 'cancel', 'schedule_cancel', 'trigger_order'):
         raise ValueError('journal_corrupt')
     optional_fields(intent, {'policy_epoch': int, 'venue': str, 'vault_address': str,
                              'venue_nonce': int, 'expires_at': int, 'delegate_signature': str})
@@ -150,6 +156,15 @@ def validate_intent_record(record):
             validate_trigger_fields(intent, 'take_profit')
     elif intent['kind'] == 'order':
         validate_order_fields(intent)
+    elif intent['kind'] == 'trigger_order':
+        require_fields(intent, {'asset': str, 'asset_index': int, 'is_buy': bool, 'reduce_only': bool,
+                                'is_market': bool, 'tpsl': str, 'size': str, 'trigger_px': str, 'limit_px': str})
+        if not intent['reduce_only'] or not intent['is_market'] or intent['tpsl'] != 'sl' or 'tif' in intent:
+            raise ValueError('journal_corrupt')
+        for name in ('size', 'trigger_px', 'limit_px'):
+            require_decimal(intent[name])
+        if abs(Decimal(intent['limit_px']) - Decimal(intent['trigger_px'])) > Decimal(intent['trigger_px']) / 2:
+            raise ValueError('journal_corrupt')
     elif intent['kind'] == 'cancel':
         require_fields(intent, {'asset': str, 'asset_index': int, 'oid': int})
     else:
@@ -279,7 +294,7 @@ def validate_record(record):
         validate_reply_fields(record)
     elif event == 'prepare_reply':
         validate_reply_fields(record)
-    elif event in ('bracket_result', 'cancel_result', 'exit_result'):
+    elif event in ('bracket_result', 'cancel_result', 'exit_result', 'backstop_result', 'backstop_replace_refused'):
         validate_record_key(record)
         require_fields(record, {'outcome': dict})
         optional_fields(record, {'request_id': str, 'reason': str, 'close_ms': int, 'oid': int},

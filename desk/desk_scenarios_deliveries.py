@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from .desk_executor import cancel, create_runtime, event_worker, recover, shutdo
 from .desk_record import delivery_path, now_ms, pending_deliveries, read_records
 from .desk_scenarios_fakes import signal_envelope, start_fake, stop_fake
 from .desk_scenarios_redis import stream_fields
+from .desk_scenarios_resident import finish_exit
 from .desk_signal_consumer import consume
 
 
@@ -60,7 +62,10 @@ async def fixture():
             runtime['allow_http_deliveries'] = True
             await prepare_deliveries(runtime)
             try:
-                yield runtime, state, trading
+                clock = time.time_ns
+                fixture_clock = runtime['config'].setdefault('fixture_clock', {'now_ms': 0})
+                with patch('time.time_ns', side_effect=lambda: max(clock(), fixture_clock['now_ms'] * 1000000)):
+                    yield runtime, state, trading
             finally:
                 await finish_deliveries(runtime)
                 state['release'].set()
@@ -167,7 +172,8 @@ async def check_timeout():
         assert rows(runtime, 'consumed')[-1]['result'] == {'state': 'filled'}
         await asyncio.wait_for(state['arrived'].wait(), 5)
         assert runtime['deliveries']['tasks'] and not rows(runtime, 'delivery_reported')
-        assert await cancel(runtime, 'first') == {'state': 'exited'}
+        assert await cancel(runtime, 'first') == {'state': 'filled'}
+        await finish_exit(runtime, trading, runtime['tickets']['first'], '100000')
         assert trading['position'] == 0 and not state['release'].is_set()
         assert not any(row.get('status') == 'timeout' for row in rows(runtime, 'delivery_pending'))
         await settle(runtime)
@@ -190,13 +196,14 @@ async def check_restart():
             assert pending_deliveries(restarted['config'])[0]['event_id'] == '1-0'
             state['status'] = 200
             await recover(restarted)
-            assert trading['position'] == 0 and posted(state) == ['1-0']
+            assert trading['position'] != 0 and posted(state) == ['1-0']
+            assert any(order.get('isTrigger') for order in trading['orders'])
             with patch('desk.desk_deliveries.now_ms', return_value=timestamp + 5000):
                 schedule_delivery(restarted)
                 await settle(restarted)
             assert posted(state) == ['1-0', '1-0']
             assert not pending_deliveries(restarted['config'])
-            assert len([intent for intent in trading['intents'] if not intent.get('reduce_only', True)]) == 1
+            assert len([intent for intent in trading['intents'] if intent['kind'] == 'bracket']) == 1
         finally:
             await finish_deliveries(restarted)
             await shutdown(restarted)

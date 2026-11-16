@@ -1,36 +1,21 @@
 import asyncio
-import copy
 import json
-import tempfile
-from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 
 from .desk_executor import cancel, control_connection, recover, submit
 from .desk_io import load_config
 from .desk_keygen import generate_key
-from .desk_record import now_ms, read_records, set_state, signed_today, ticket_key
+from .desk_record import now_ms, read_records, signed_today
 from .desk_scenarios_checks import check_gate, check_intake, check_prompt_front_matter, check_tree_style, check_sizer, check_symbol_mapping, check_ticket_local, check_ticket_preview_local
-from .desk_scenarios_fakes import eventually, meta, signal_envelope, start_fake, stop_fake, trade
+from .desk_scenarios_fakes import signal_envelope
 from .desk_scenarios_redis import check_consumer
 from .desk_scenarios_execution import check_execution
-from .desk_signal import parse_signal
-from .desk_watcher import arm, queue_event
-from .signer_delegate_client import refresh_meta
-
-
-@asynccontextmanager
-async def fixture():
-    with tempfile.TemporaryDirectory() as directory:
-        async with aiohttp.ClientSession() as session:
-            runtime, fake, runner = await start_fake(Path(directory), session)
-            try:
-                yield runtime, fake
-            finally:
-                await stop_fake(runtime, runner)
+from .desk_scenarios_resident import finish_exit, fixture, market_book, next_event
 
 
 async def check_failed_budget():
@@ -47,21 +32,16 @@ async def check_happy():
     async with fixture() as (runtime, fake):
         assert (await submit(runtime, signal_envelope()))['state'] == 'filled'
         assert fake['events'].index('watcher_armed') < fake['events'].index('intent')
-        await trade(fake, '98999')
-        await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-        assert fake['position'] == 0 and len(fake['intents']) == 2
-        assert [intent['reduce_only'] for intent in fake['intents']] == [False, True]
-        assert all(intent['tif'] == 'Ioc' for intent in fake['intents'])
+        ticket = runtime['tickets']['sample']
+        await finish_exit(runtime, fake, ticket)
+        assert fake['intents'][0]['kind'] == 'bracket'
+        exits = [intent for intent in fake['intents'] if intent['kind'] == 'order']
+        assert len(exits) == 2 and all(intent['reduce_only'] and intent['tif'] == 'Alo' for intent in exits)
         rows = read_records(runtime['config']['record_path'])
-        assert [row['state'] for row in rows if row['event'] == 'state'] == ['claimed', 'sent', 'filled', 'exited']
         reviews = [row for row in rows if row['event'] == 'review']
-        assert len(reviews) == 1 and reviews[0]['stop'] == 'software' and reviews[0]['stop_hit']
-        assert reviews[0]['fill_price'] == '100000' and Decimal(reviews[0]['slippage']) == 0
-        for row in (row for row in rows if row['event'] == 'intent'):
-            assert row['hl_oracle_px'] == '100001' and row['binance_px'] == '100002'
-            assert row['hl_oracle_timestamp'] > 0 and row['binance_timestamp'] > 0
+        assert len(reviews) == 1 and reviews[0]['stop_hit'] and reviews[0]['fill_price'] == '100000'
+        assert all(row['hl_oracle_px'] == '100001' and row['binance_px'] == '100002' for row in rows if row['event'] == 'intent')
         assert signed_today(runtime['config'], 'BTC') == Decimal('0.01')
-
 
 async def check_prepare():
     async with fixture() as (runtime, fake):
@@ -97,6 +77,7 @@ async def check_duplicate():
         envelope['payload']['publisher'] = 'another-publisher'
         assert (await submit(runtime, envelope))['refused'] == 'already_acted'
         assert len(fake['intents']) == 1
+        generate_key(runtime['config'])
         key_path = Path(runtime['config']['delegate_key_file'])
         original = key_path.read_bytes()
         try:
@@ -109,81 +90,69 @@ async def check_duplicate():
 
 
 async def seed_live_entry(runtime, fake):
-    signal = parse_signal(signal_envelope('live'), meta(), now_ms())
-    runtime['asset_indices'] = {'BTC': 0, 'ETH': 1}
-    await refresh_meta(runtime)
-    ticket = {'key': ticket_key(runtime['config'], signal), 'signal': signal, 'claimed_at': now_ms(),
-              'position': Decimal(0), 'orders': [], 'alive': False}
-    runtime['tickets']['live'] = ticket
-    set_state(runtime['config'], ticket, 'claimed')
-    await arm(runtime, ticket)
-    set_state(runtime['config'], ticket, 'sent')
-    fake['orders'] = [{'oid': 42, 'coin': 'BTC', 'sz': '0.006'}]
-    fake['position'] = Decimal('0.004')
+    fake['partial_entry'] = '0.004'
+    await submit(runtime, signal_envelope('live'))
+    await runtime['events'].join()
+    ticket = runtime['tickets']['live']
+    assert not ticket.get('entry_done') and ticket['position'] == Decimal('0.004')
     return ticket
 
-
 async def check_cancel():
-    async with fixture() as (runtime, fake):
-        await seed_live_entry(runtime, fake)
-        config = runtime['config']
-        path = Path(config['record_path']).parent / 'config.json'
-        path.write_text(json.dumps(config))
-        server = await asyncio.start_unix_server(lambda reader, writer: control_connection(runtime, reader, writer), path=config['control_socket'])
-        async with server:
-            process = await asyncio.create_subprocess_exec('python3', '-B', '-m', 'desk.desk_executor', '--config', str(path),
-                                                           'cancel', 'live', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            output, errors = await process.communicate()
-            assert process.returncode == 0, errors.decode()
-            assert json.loads(output)['state'] == 'exited'
-        assert not fake['orders'] and fake['position'] == 0
-        assert [intent['kind'] for intent in fake['intents']] == ['cancel', 'order']
-        assert fake['intents'][-1]['reduce_only']
-    async with fixture() as (runtime, fake):
-        await seed_live_entry(runtime, fake)
-        envelope = {'version': 1, 'payload': {'kind': 'cancel', 'signal_id': 'live', 'publisher': 'publisher-placeholder'}, 'receipt': None}
-        assert (await submit(runtime, envelope))['state'] == 'exited'
-        assert not fake['orders'] and fake['position'] == 0
-        assert fake['intents'][-1]['reduce_only']
-
+    for control in (True, False):
+        async with fixture() as (runtime, fake):
+            ticket = await seed_live_entry(runtime, fake)
+            if control:
+                output = []
+                reader = SimpleNamespace(readline=AsyncMock(return_value=b'{"signal_id":"live"}'))
+                writer = SimpleNamespace(write=output.append, drain=AsyncMock(), close=lambda: None, wait_closed=AsyncMock())
+                await control_connection(runtime, reader, writer)
+                assert json.loads(output[0])['state'] == 'filled'
+            else:
+                envelope = {'version': 1, 'payload': {'kind': 'cancel', 'signal_id': 'live', 'publisher': 'publisher-placeholder'}}
+                assert (await submit(runtime, envelope))['state'] == 'filled'
+            assert ticket['closing'] == 'withdrawn' and len(fake['intents']) == 1
+            await next_event(runtime, ticket, market_book())
+            assert fake['intents'][1]['kind'] == 'cancel' and fake['intents'][1]['oid'] == 42
+            assert any(order.get('isTrigger') for order in fake['orders'])
+            await finish_exit(runtime, fake, ticket, '100000')
 
 async def check_recovery():
-    async with fixture() as (runtime, fake):
-        fake['dead_on_fill'] = True
-        assert (await submit(runtime, signal_envelope()))['state'] == 'exited'
-        assert len(fake['intents']) == 2 and fake['intents'][-1]['reduce_only'] and fake['position'] == 0
     async with fixture() as (runtime, fake):
         fake['timeout_entry'] = True
         runtime['config']['request_timeout_seconds'] = 0.03
         assert (await submit(runtime, signal_envelope()))['state'] == 'filled'
-        sent_index = fake['events'].index('intent')
-        assert 'openOrders' in fake['events'][sent_index:] and 'userFills' in fake['events'][sent_index:]
-        assert len(fake['intents']) == 1
-        await cancel(runtime, 'sample')
-        assert len([intent for intent in fake['intents'] if not intent.get('reduce_only', True)]) == 1
-        assert fake['position'] == 0
+        assert len(fake['intents']) == 1 and fake['orders'][0]['isTrigger']
+        assert any(row['type'] == 'frontendOpenOrders' for row in fake['info_requests'])
 
+    async with fixture() as (runtime, fake):
+        await submit(runtime, signal_envelope())
+        await runtime['events'].join()
+        before = len(fake['intents'])
+        await recover(runtime)
+        ticket = runtime['tickets']['sample']
+        assert ticket['entry_done'] and ticket['backstop_px'] == '98000'
+        assert fake['position'] == Decimal('0.01') and len(fake['intents']) == before
+        assert any(order.get('isTrigger') for order in fake['orders'])
+        await cancel(runtime, 'sample')
+        await finish_exit(runtime, fake, ticket, '100000')
 
 async def check_rate_limit():
     async with fixture() as (runtime, fake):
         await submit(runtime, signal_envelope())
         fake['rate_exit'] = True
-        await trade(fake, '98999')
-        await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-        assert len(fake['intents']) == 3 and fake['position'] == 0
-        exits = fake['intents'][1:]
+        await finish_exit(runtime, fake, runtime['tickets']['sample'])
+        exits = [intent for intent in fake['intents'] if intent['kind'] == 'order']
         assert exits[0]['request_id'] == exits[1]['request_id']
         records = read_records(runtime['config']['record_path'])
         backoffs = [row for row in records if row['event'] == 'backoff']
         assert len(backoffs) == 1 and backoffs[0]['retry'] and backoffs[0]['seconds'] == '0.01'
-        sends = [row for row in records if row['event'] == 'intent' and row['intent']['reduce_only']]
+        sends = [row for row in records if row['event'] == 'intent' and row['intent'].get('reduce_only')]
         assert sends[1]['timestamp'] - sends[0]['timestamp'] >= 10
     async with fixture() as (runtime, fake):
         fake['rate_entry'] = True
         assert (await submit(runtime, signal_envelope()))['refused'] == 'http_429'
         assert len(fake['intents']) == 1 and fake['position'] == 0
         assert signed_today(runtime['config'], 'BTC') == 0
-
 
 async def check_symbols():
     check_symbol_mapping()
@@ -200,12 +169,7 @@ async def check_symbols():
             assert resolved['asset_index'] == asset_index
             assert any(request['type'] == 'perpDexs' for request in fake['info_requests'])
             assert any(request == {'type': 'meta', 'dex': 'xyz'} for request in fake['info_requests'])
-            fake['orders'] = [{'coin': canonical, 'oid': 42, 'sz': '0.001'}]
-            await trade(fake, '98999', canonical)
-            await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-            assert fake['position'] == 0 and not fake['orders']
-            assert [intent['kind'] for intent in fake['intents']] == ['order', 'cancel', 'order']
-            assert fake['intents'][-1]['reduce_only']
+            await finish_exit(runtime, fake, runtime['tickets']['sample'])
             assert all(intent['asset'] == canonical and intent['asset_index'] == asset_index for intent in fake['intents'])
             records = read_records(runtime['config']['record_path'])
             assert all(row['signal']['venue_symbol'] == canonical for row in records if row['event'] == 'state')
@@ -218,101 +182,50 @@ async def check_symbols():
 
 
 async def check_events():
-    for channel in ('trades', 'userFills'):
+    for channel in ('trades', 'userFills', 'l2Book'):
         async with fixture() as (runtime, fake):
-            assert (await submit(runtime, signal_envelope()))['state'] == 'filled'
+            await submit(runtime, signal_envelope())
             await runtime['events'].join()
             runtime['config']['policy']['expires_at'] = now_ms() // 1000 + 59
-            await asyncio.sleep(0.02)
+            ticket = runtime['tickets']['sample']
             assert len(fake['intents']) == 1 and fake['position'] != 0
-            if channel == 'trades':
-                await trade(fake, '100000')
-            else:
-                for websocket in tuple(fake['websockets']):
-                    await websocket.send_json({'channel': 'userFills', 'data': {'fills': []}})
-            await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-            assert fake['position'] == 0 and len(fake['intents']) == 2
-            assert fake['intents'][-1]['reduce_only'] and fake['intents'][-1]['tif'] == 'Ioc'
-            rows = read_records(runtime['config']['record_path'])
-            assert [row['reason'] for row in rows if row['event'] == 'state' and row['state'] == 'exited'] == ['expiry']
-    async with fixture() as (runtime, fake):
-        fake['after_entry'] = lambda: runtime['config']['policy'].update(expires_at=now_ms() // 1000 + 59)
-        assert (await submit(runtime, signal_envelope()))['state'] == 'exited'
-        assert len(fake['intents']) == 2 and fake['intents'][-1]['reduce_only'] and fake['position'] == 0
-    for reason, mark in [('stop', '98999'), ('target', '102001'), ('expiry', '100000'), ('watcher_dead', '100000')]:
-        async with fixture() as (runtime, fake):
-            assert (await submit(runtime, signal_envelope()))['state'] == 'filled'
-            await runtime['events'].join()
-            fake['mark'] = mark
-            if reason == 'expiry':
-                runtime['config']['policy']['expires_at'] = now_ms() // 1000 + 59
-            if reason == 'watcher_dead':
-                fake['fail_reconnect'] = True
-            for websocket in tuple(fake['websockets']):
-                await websocket.close()
-            await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-            assert len(fake['intents']) == 2 and fake['position'] == 0 and fake['intents'][-1]['reduce_only']
-            rows = read_records(runtime['config']['record_path'])
-            assert [row['reason'] for row in rows if row['event'] == 'state' and row['state'] == 'exited'] == [reason]
-            if reason != 'watcher_dead':
-                restarted = next(index for index, row in enumerate(rows) if row['event'] == 'watcher_restarted')
-                assert rows[restarted - 1]['event'] == 'reconcile'
+            event = market_book() if channel == 'l2Book' else {'channel': channel, 'data': []}
+            await next_event(runtime, ticket, event)
+            assert ticket['closing'] == 'expiry'
+            await finish_exit(runtime, fake, ticket, '100000')
     async with fixture() as (runtime, fake):
         await submit(runtime, signal_envelope())
         await runtime['events'].join()
-        for websocket in tuple(fake['websockets']):
-            await websocket.close()
-        await eventually(lambda: any(row['event'] == 'watcher_restarted' for row in read_records(runtime['config']['record_path'])))
-        await runtime['events'].join()
-        assert runtime['tickets']['sample']['state'] == 'filled' and len(fake['intents']) == 1
-        await trade(fake, '98999')
-        await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
+        ticket = runtime['tickets']['sample']
+        await next_event(runtime, ticket, {'channel': 'watcher_dead'})
+        assert len(fake['intents']) == 1 and fake['orders']
+        await next_event(runtime, ticket, {'channel': 'watcher_restarted'})
+        assert len(fake['intents']) == 1
+        assert any(row['event'] == 'watcher_restarted' for row in read_records(runtime['config']['record_path']))
     async with fixture() as (runtime, fake):
         fake['unfilled_entry'] = True
         envelope = signal_envelope()
-        assert (await submit(runtime, envelope)) == {'state': 'not_filled'}
+        assert await submit(runtime, envelope) == {'state': 'not_filled'}
         ticket = runtime['tickets']['sample']
         assert ticket['done'].is_set() and not ticket['alive']
-        await eventually(lambda: not fake['websockets'])
-        assert (await cancel(runtime, 'sample')) == {'state': 'not_filled'}
         await recover(runtime)
         assert (await submit(runtime, envelope))['refused'] == 'already_acted'
-        assert len(fake['intents']) == 1 and fake['position'] == 0
-        rows = read_records(runtime['config']['record_path'])
-        assert [row['state'] for row in rows if row['event'] == 'state'] == ['claimed', 'sent', 'not_filled']
-        assert len([row for row in rows if row['event'] == 'review']) == 1
-
+        assert len(fake['intents']) == 1
 
 async def check_extra():
     async with fixture() as (runtime, fake):
-        envelope = signal_envelope('entry-only')
-        assert (await submit(runtime, envelope))['state'] == 'filled'
-        await runtime['events'].join()
-        ticket = runtime['tickets']['entry-only']
-        with patch('desk.desk_executor.now_ms', return_value=ticket['signal']['reply_by'] + 1):
-            queue_event(runtime, ticket, {'channel': 'trades', 'data': [{'coin': 'BTC', 'px': '100000'}]})
-            await runtime['events'].join()
-        assert ticket['state'] == 'filled' and len(fake['intents']) == 1
-        await cancel(runtime, 'entry-only')
-    async with fixture() as (runtime, fake):
         await submit(runtime, signal_envelope())
-        fake['partial_exit'] = True
-        await trade(fake, '102001')
-        await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-        assert len(fake['intents']) == 3 and fake['position'] == 0
+        await runtime['events'].join()
+        ticket = runtime['tickets']['sample']
+        with patch('desk.desk_executor.now_ms', return_value=ticket['signal']['reply_by'] + 1):
+            await next_event(runtime, ticket, market_book())
+        assert ticket['state'] == 'filled' and len(fake['intents']) == 1
+        await finish_exit(runtime, fake, ticket, '102001')
         reviews = [row for row in read_records(runtime['config']['record_path']) if row['event'] == 'review']
         assert len(reviews) == 1 and not reviews[0]['stop_hit']
-    async with fixture() as (runtime, fake):
-        await submit(runtime, signal_envelope())
-        runtime['config']['policy']['expires_at'] = now_ms() // 1000 + 59
-        await trade(fake, '100000')
-        await eventually(lambda: runtime['tickets']['sample']['state'] == 'exited')
-        assert fake['position'] == 0
-    async with fixture() as (runtime, fake):
         path = Path(runtime['config']['record_path']).parent / 'config.json'
         path.write_text(json.dumps(runtime['config']))
-        assert load_config(path)['risk_fraction'] == '0.01'
-
+        assert load_config(path)['exit_depth_frac'] == '0.03'
 
 async def main():
     check_prompt_front_matter()
@@ -327,15 +240,15 @@ async def main():
     print('PASS ticket local: shared sizing/gate, nonresident refusal, no coordinator call, config and read-only review', flush=True)
     await check_failed_budget()
     print('PASS 2: gate, expiry, reduce-only, caps, failed signed budget and reply_by', flush=True)
-    for name, function in [('3: watcher-first IOC, stop exit, record and Reviewer', check_happy),
+    for name, function in [('3: watcher-first bracket, sliced stop exit, record and Reviewer', check_happy),
                            ('4: prepare refusal and exactly one stale-nonce retry', check_prepare),
                            ('5: wrong-vault rearm refused before signing', check_rearm),
                            ('6: durable signal deduplication and key overwrite refusal', check_duplicate),
-                           ('7: cancel CLI and cancel envelope remove entry and flatten', check_cancel),
-                           ('7b: dead watcher flatten and ambiguous timeout reconciliation', check_recovery),
+                           ('7: cancel control command and envelope remove entry and unwind', check_cancel),
+                           ('7b: recovery retains backstop and never replays entry', check_recovery),
                            ('7d: exit 429 backoff/resend and entry 429 drop', check_rate_limit),
                            ('7e: canonical symbols, builder index, ambiguous and unmapped refusals', check_symbols),
-                           ('7f: event expiry, reconnect reconciliation and terminal unfilled IOC', check_events)]:
+                           ('7f: event expiry, reconnect reconciliation and terminal unfilled bracket', check_events)]:
         await function()
         print('PASS ' + name, flush=True)
     await check_consumer()

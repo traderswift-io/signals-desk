@@ -4,6 +4,15 @@ from .desk_wake import BAR_MS, active_asset
 from .signer_delegate_client import bracket_fields, now_ms, price_text, read_info, resolve_symbol
 
 
+def resident_bracket(config, signal, size, size_decimals):
+    buy = signal['side'] == 'long'
+    levels = signal['levels']
+    extra = Decimal(str(config.get('backstop_extra_bps', '100'))) / 10000
+    stop = Decimal(levels['stop'])
+    backstop = stop - Decimal(levels['entry']) * extra if buy else stop + Decimal(levels['entry']) * extra
+    return signal_bracket(config, {**signal, 'levels': {**levels, 'stop': str(backstop), 'target': None}}, size, size_decimals)
+
+
 def signal_bracket(config, signal, size, size_decimals):
     try:
         band = Decimal(str(config.get('bracket_slippage_bps', '50'))) / 10000

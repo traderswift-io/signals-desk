@@ -77,15 +77,15 @@ async def check_consumer():
                     restarted = create_runtime(runtime['config'], session)
                     restarted['worker'] = asyncio.create_task(event_worker(restarted))
                     await recover(restarted)
-                    assert fake['position'] == 0
-                    entries_before = len([intent for intent in fake['intents'] if not intent.get('reduce_only', True)])
+                    assert fake['position'] != 0 and any(order.get('isTrigger') for order in fake['orders'])
+                    entries_before = len([intent for intent in fake['intents'] if intent['kind'] == 'bracket'])
                     waiting = asyncio.create_task(consume(restarted, reader, 1))
                     await asyncio.sleep(0.03)
                     assert not waiting.done()
                     duplicate_id = await admin.xadd('signals', stream_fields(first))
                     await asyncio.wait_for(waiting, 5)
                     assert reader_cursor(restarted['config']) == duplicate_id
-                    assert len([intent for intent in fake['intents'] if not intent.get('reduce_only', True)]) == entries_before == 1
+                    assert len([intent for intent in fake['intents'] if intent['kind'] == 'bracket']) == entries_before == 1
                     consumed = [row for row in read_records(runtime['config']['record_path']) if row['event'] == 'consumed']
                     assert len(consumed) == 3 and consumed[-1]['result']['refused'] == 'already_acted'
                 finally:

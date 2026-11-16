@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from .desk_exit_custody import exit_custody
+from .desk_exit_pacing import exit_pacing
 from .desk_journal_evidence import validate_execution_history
 
 
@@ -62,14 +64,18 @@ def validate_history(records):
     intents = intent_records(records)
     reply_records(records)
     validate_execution_history(records)
+    exit_custody(records)
+    exit_pacing(records)
     signals, request_keys, replies, results = {}, {}, {}, {}
-    states = {}
+    states, backstops = {}, {}
     for row in records:
         event = row['event']
         key = row.get('key')
         if event == 'state':
             identity = tuple(key)
             require_same(signals.setdefault(identity, row['signal']), row['signal'])
+            if row.get('backstop_px') is not None:
+                require_same(backstops.setdefault(identity, row['backstop_px']), row['backstop_px'])
             states[identity] = row
         if event == 'review':
             state = states.get(tuple(key))
@@ -91,7 +97,7 @@ def validate_history(records):
             require_same(request_keys.setdefault(request_id, key), key)
         if event == 'reply':
             replies[request_id] = row
-        if event not in ('bracket_result', 'cancel_result', 'exit_result'):
+        if event not in ('bracket_result', 'cancel_result', 'exit_result', 'backstop_result', 'backstop_replace_refused'):
             continue
         outcome = row['outcome']
         copied_intent = outcome.get('intent')
@@ -112,7 +118,8 @@ def validate_history(records):
             raise ValueError('journal_corrupt')
         require_same(original['intent'], copied_intent)
         require_same(original.get('key'), key)
-        expected_kind = {'bracket_result': 'bracket', 'cancel_result': 'cancel', 'exit_result': 'order'}[event]
+        expected_kind = {'bracket_result': 'bracket', 'cancel_result': 'cancel', 'exit_result': 'order',
+                         'backstop_result': 'trigger_order', 'backstop_replace_refused': 'trigger_order'}[event]
         require_same(copied_intent['kind'], expected_kind)
         for name in ('signed', 'ambiguous'):
             default = False if name == 'ambiguous' else None
@@ -128,10 +135,14 @@ def validate_history(records):
         if row['event'] == 'review':
             if Decimal(row['signal_entry']) != Decimal(signal['levels']['entry']):
                 raise ValueError('journal_corrupt')
-        if row['event'] == 'intent' and row['intent']['kind'] in ('order', 'bracket', 'cancel'):
+        if row['event'] == 'intent' and row['intent']['kind'] in ('order', 'bracket', 'cancel', 'trigger_order'):
             for name in ('asset', 'asset_index'):
                 require_same(row['intent'][name], signal[name])
             intent = row['intent']
-            if intent['kind'] in ('order', 'bracket'):
+            backstop = backstops.get(tuple(row['key']))
+            if backstop is not None and intent['kind'] in ('bracket', 'trigger_order'):
+                trigger = intent['stop']['trigger_px'] if intent['kind'] == 'bracket' else intent['trigger_px']
+                require_same(backstop, trigger)
+            if intent['kind'] in ('order', 'bracket', 'trigger_order'):
                 entry = intent.get('entry', intent)
                 require_same(entry['is_buy'], (signal['side'] == 'long') != entry['reduce_only'])

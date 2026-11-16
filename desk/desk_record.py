@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
+from .desk_exit_custody import exit_custody
+from .desk_exit_pacing import MAX_STATE_TIMESTAMP, bounded_integer, exit_pacing
 from .desk_journal_identity import intent_records as first_intent_records, reply_records, validate_history
 from .desk_journal_evidence import reply_evidence, validate_execution_history
 from .desk_journal_schema import validate_record
@@ -32,12 +34,16 @@ def sync_file(stream):
 
 
 def now_ms():
-    return time.time_ns() // 1000000
+    timestamp = time.time_ns() // 1000000
+    bounded_integer(timestamp, 0, MAX_STATE_TIMESTAMP)
+    return timestamp
 
 
 def append_record(path, event, **values):
     record = journal_number_strings({'event': event, 'timestamp': now_ms(), **values})
     line = json.dumps(record, default=str, allow_nan=False, sort_keys=True, separators=(',', ':'))
+    if event == 'state':
+        validate_record(decode_json(line))
     with private_open(path, 'a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0, 2)
@@ -113,7 +119,10 @@ def set_state(config, ticket, state, **values):
     details = {'claimed_at': ticket['claimed_at'], 'fill_price': ticket.get('fill_price'),
                'entry_done': ticket.get('entry_done', False), 'close_ms': ticket.get('close_ms'),
                'entry_cancel_reason': ticket.get('entry_cancel_reason'),
-               'stop_hit': ticket.get('stop_hit', False), **values}
+               'stop_hit': ticket.get('stop_hit', False),
+               'backstop_px': ticket.get('backstop_px'), 'closing': ticket.get('closing'),
+               'last_exit_action_ms': ticket.get('last_exit_action_ms'), 'exit_action_cost': ticket.get('exit_action_cost'),
+               'action_budget_low': ticket.get('action_budget_low'), 'exit_fast': ticket.get('exit_fast'), **values}
     append_record(config['record_path'], 'state', key=ticket['key'], state=state, signal=ticket['signal'], **details)
     ticket['state'] = state
     if state in ('refused', 'exited', 'not_filled') and ticket.get('done'):
@@ -122,9 +131,12 @@ def set_state(config, ticket, state, **values):
 
 def latest_tickets(config):
     latest = {}
-    for row in read_records(config['record_path']):
+    records = read_records(config['record_path'])
+    custody = exit_custody(records)
+    pacing = exit_pacing(records)
+    for row in records:
         if row['event'] == 'state' and row['key'][0] == config['account_address']:
-            latest[tuple(row['key'])] = row
+            latest[tuple(row['key'])] = {**row, **custody[tuple(row['key'])], **pacing.get(tuple(row['key']), {})}
     return latest
 
 

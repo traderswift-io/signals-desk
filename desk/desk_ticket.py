@@ -51,7 +51,8 @@ async def ticket_result(arguments):
             return sized
         with journal_guard(config) as refusal:
             budget = signed_today(config, signal['asset'])
-            reason = evaluate_intent(intent, config['policy'], runtime['asset_indices'], budget, now_ms(), signal['reply_by'])
+            reason = evaluate_intent(intent, config['policy'], runtime['asset_indices'], budget,
+                                     now_ms(), signal['reply_by'], signal.get('exit_by'))
         if refusal:
             return refusal
         if not reason and not config.get('resident', True):

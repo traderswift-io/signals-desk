@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from .desk_executor import cancel, submit
+from .desk_scenarios_resident import finish_exit
 from .desk_record import read_records, signed_today
 from .desk_scenarios_anchor_gate import verify_fixture
 from .desk_scenarios_bracket import envelope, fixture
@@ -48,7 +49,8 @@ async def check_entry_reply_evidence():
 
         with patch('desk.desk_executor.arm', arm):
             assert await submit(runtime, envelope('previous')) == {'state': 'filled'}
-        assert await cancel(runtime, 'previous') == {'state': 'exited'}
+        assert await cancel(runtime, 'previous') == {'state': 'filled'}
+        await finish_exit(runtime, fake, runtime['tickets']['previous'], '100000')
         runtime['config']['policy']['asset_caps'][0]['max_daily_size'] = '0.015'
         runtime['config']['resident'] = False
         value = envelope('next')

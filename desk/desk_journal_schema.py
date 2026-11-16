@@ -1,3 +1,4 @@
+from .desk_exit_pacing import pacing_cost, validate_state_integers
 from .desk_journal_shapes import require_decimal, require_fields, validate_record as validate_record_details
 
 
@@ -83,13 +84,23 @@ EVENT_FIELDS = {
     'anchor_verified': {'signal_id': text_field, 'payload_hash': text_field},
     'state': {'key': key_field, 'state': text_field, 'signal': dict, 'claimed_at': integer_field,
               'fill_price': nullable(price_field), 'entry_done': bool, 'close_ms': nullable(integer_field),
-              'entry_cancel_reason': nullable(text_field), 'stop_hit': bool, 'reason': text_field},
+              'entry_cancel_reason': nullable(text_field), 'stop_hit': bool, 'reason': text_field,
+              'backstop_px': nullable(price_field), 'closing': nullable(text_field),
+              'last_exit_action_ms': nullable(integer_field), 'exit_action_cost': nullable(pacing_cost),
+              'action_budget_low': nullable(bool), 'exit_fast': nullable(bool)},
+    'exit_reservation': {'key': key_field, 'cost': pacing_cost},
     'intent': {'key': key_field, 'intent': dict, 'rearm_intent': dict, **PRICE_FIELDS},
     'reply': {'key': key_field, **REPLY_FIELDS},
     'prepare_reply': {'key': key_field, **REPLY_FIELDS},
     'bracket_result': RESULT_FIELDS,
     'cancel_result': RESULT_FIELDS,
     'exit_result': RESULT_FIELDS,
+    'backstop_result': RESULT_FIELDS,
+    'backstop_replace_refused': RESULT_FIELDS,
+    'action_budget_low': {'key': key_field},
+    'action_budget_unavailable': {'key': key_field},
+    'low_liquidity': {'key': key_field},
+    'time_stop': {'key': key_field},
     'refusal': {'signal_id': text_field, 'reason': text_field},
     'review': {'key': key_field, 'signal_entry': price_field, 'fill_price': nullable(price_field),
                'slippage': nullable(slippage_field), 'stop_hit': bool, 'stop': text_field, 'description': text_field},
@@ -140,3 +151,7 @@ def validate_record(record):
                 continue
             check_field(value, REPLY_FIELDS[name])
     validate_record_details(record)
+    if record['event'] == 'state':
+        validate_state_integers(record)
+    elif record['event'] == 'exit_reservation':
+        require_fields(record, {'key': list, 'cost': int})

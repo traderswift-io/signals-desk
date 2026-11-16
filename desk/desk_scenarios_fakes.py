@@ -78,7 +78,7 @@ async def coordinator_intent(request):
     if state.get('stale', 0):
         state['stale'] -= 1
         return web.json_response({'signed': False, 'reason': 'nonce_not_above_highest_signed_99'})
-    if state.get('rate_entry') and intent['kind'] == 'order' and not intent['reduce_only']:
+    if state.get('rate_entry') and (intent['kind'] == 'bracket' or intent['kind'] == 'order' and not intent['reduce_only']):
         state['rate_entry'] = False
         return web.Response(status=429, headers={'Retry-After': '0.01'})
     if state.get('rate_exit') and intent.get('reduce_only'):
@@ -88,6 +88,8 @@ async def coordinator_intent(request):
         if state.get('bracket_refusal'):
             return web.json_response({'signed': False, 'reason': state['bracket_refusal']})
         entry = intent['entry']
+        if state.get('signed_failure') or state.get('unfilled_entry'):
+            return web.json_response({'signed': True, 'venue_answer': {'response': {'type': 'order', 'data': {'statuses': [{'error': 'venue_failed'}]}}}})
         assert entry['tif'] == 'Gtc' and not entry['reduce_only']
         state['orders'].append({'coin': entry['asset'], 'oid': 42, 'sz': entry['size'],
                                 'reduceOnly': False, 'isTrigger': False})
@@ -97,11 +99,39 @@ async def coordinator_intent(request):
                 leg = intent[name]
                 assert leg['reduce_only'] and leg['is_market']
                 state['orders'].append({'coin': leg['asset'], 'oid': index, 'sz': leg['size'],
-                                        'reduceOnly': True, 'isTrigger': True})
+                                        'reduceOnly': True, 'isTrigger': True, 'orderType': 'Stop Market' if name == 'stop' else 'Take Profit Market',
+                                        'triggerPx': leg['trigger_px'], 'limitPx': leg['limit_px']})
                 statuses.append({'resting': {'oid': index}})
+        if state.get('resident'):
+            filled = state.get('partial_entry', entry['size'])
+            if Decimal(filled) == Decimal(entry['size']):
+                state['orders'] = [order for order in state['orders'] if order['oid'] != 42]
+            else:
+                state['orders'][0]['sz'] = str(Decimal(entry['size']) - Decimal(filled))
+            fill_fake(state, {**entry, 'size': filled})
+            if state.get('dead_on_fill'):
+                for websocket in tuple(state['websockets']):
+                    await websocket.close()
+            if state.get('timeout_entry'):
+                await asyncio.sleep(0.12)
+            if state.get('after_entry'):
+                state['after_entry']()
+    elif intent['kind'] == 'trigger_order':
+        if state.get('trigger_refused'):
+            reason = state['trigger_refused'] if isinstance(state['trigger_refused'], str) else 'unsupported_kind'
+            return web.json_response({'signed': False, 'reason': reason})
+        oid = 1000 + len(state['intents'])
+        state['orders'].append({'coin': intent['asset'], 'oid': oid, 'sz': intent['size'], 'reduceOnly': True,
+                                'isTrigger': True, 'orderType': 'Stop Market', 'triggerPx': intent['trigger_px']})
+        statuses = [{'resting': {'oid': oid}}]
     elif intent['kind'] == 'cancel':
         state['orders'] = [order for order in state['orders'] if order['oid'] != intent['oid']]
         statuses = ['success']
+    elif intent.get('tif') == 'Alo':
+        oid = 1000 + len(state['intents'])
+        state['orders'].append({'coin': intent['asset'], 'oid': oid, 'sz': intent['size'], 'limitPx': intent['limit_px'],
+                                'reduceOnly': True, 'isTrigger': False, 'side': 'B' if intent['is_buy'] else 'A'})
+        statuses = [{'resting': {'oid': oid}}]
     elif state.get('signed_failure'):
         statuses = [{'error': 'venue_failed'}]
     elif state.get('unfilled_entry') and not intent['reduce_only']:
@@ -111,7 +141,7 @@ async def coordinator_intent(request):
         statuses = [{'error': 'Ioc order would have no immediate match'}]
     else:
         assert intent['tif'] == 'Ioc'
-        assert 'watcher_armed' in state['events']
+        assert not state.get('resident', True) or 'watcher_armed' in state['events']
         size = Decimal(intent['size'])
         if intent['reduce_only']:
             size = min(size, abs(state['position']))
@@ -156,6 +186,8 @@ async def info(request):
         result = [current_meta, [{'markPx': state.get('mark', '100000'), 'oraclePx': '100001'} for asset in current_meta['universe']]]
     elif kind in ('openOrders', 'frontendOpenOrders'):
         result = [order for order in state['orders'] if (order['coin'].split(':')[0] if ':' in order['coin'] else '') == dex]
+    elif kind == 'userRateLimit':
+        result = {'nRequestsCap': 10000, 'nRequestsUsed': state.get('requests_used', 0)}
     elif kind == 'candleSnapshot':
         start = body['req']['startTime']
         result = [{'t': start, 'T': start + 899999, 'c': state.get('candle_close', '100000')}]
@@ -195,7 +227,7 @@ async def websocket_handler(request):
         async for message in websocket:
             command = json.loads(message.data)
             subscriptions.append(command['subscription']['type'])
-            if set(subscriptions) == {'trades', 'userFills'}:
+            if set(subscriptions) == {'trades', 'l2Book', 'userFills'}:
                 state['events'].append('watcher_armed')
             await websocket.send_json({'channel': 'subscriptionResponse', 'data': command})
     finally:
@@ -204,7 +236,7 @@ async def websocket_handler(request):
 
 
 async def start_fake(directory, session):
-    state = {'prepares': 0, 'nonce': 100, 'intents': [], 'events': [], 'position': Decimal(0), 'orders': [], 'fills': [], 'websockets': []}
+    state = {'resident': True, 'prepares': 0, 'nonce': 100, 'intents': [], 'events': [], 'position': Decimal(0), 'orders': [], 'fills': [], 'websockets': []}
     application = web.Application()
     application['state'] = state
     application.add_routes([web.post('/prepare', coordinator_prepare), web.post('/intent', coordinator_intent),
@@ -246,3 +278,22 @@ def record_anchor_fixture(config, envelope):
 async def submit_verified_fixture(runtime, envelope):
     record_anchor_fixture(runtime['config'], envelope)
     return await submit(runtime, envelope)
+
+
+def fill_fake(state, fields):
+    size = Decimal(fields['size'])
+    if fields.get('reduce_only'):
+        size = min(size, abs(state['position']))
+    state['position_asset'] = fields['asset']
+    state['position'] += size if fields['is_buy'] else -size
+    state['fills'].append({'coin': fields['asset'], 'sz': str(size), 'px': fields['limit_px'],
+                           'side': 'B' if fields['is_buy'] else 'A', 'time': now_ms(),
+                           'tid': len(state['fills']) + 1, 'oid': len(state['fills']) + 100})
+
+
+def fill_passive(state):
+    for order in list(state['orders']):
+        if order.get('reduceOnly') and not order.get('isTrigger'):
+            fill_fake(state, {'size': order['sz'], 'asset': order['coin'], 'limit_px': order['limitPx'],
+                              'reduce_only': True, 'is_buy': order['side'] == 'B'})
+            state['orders'].remove(order)

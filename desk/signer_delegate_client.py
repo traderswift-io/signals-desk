@@ -235,7 +235,7 @@ async def market_context(runtime, symbol, timeout_seconds=10):
 
 async def reconcile_asset(runtime, symbol):
     account = runtime['config']['account_address']
-    orders = await read_info(runtime, 'openOrders' if runtime['config'].get('resident', True) else 'frontendOpenOrders',
+    orders = await read_info(runtime, 'frontendOpenOrders',
                              user=account, **dex_fields(symbol))
     fills = await read_info(runtime, 'userFills', user=account)
     state = await account_state(runtime, symbol)
@@ -298,7 +298,8 @@ def bracket_fields(asset, size, entry_price, is_buy, stop_trigger, stop_limit,
         wrong_side = Decimal(trigger) >= reference if is_buy == (tpsl == 'sl') else Decimal(trigger) <= reference
         if wrong_side:
             raise ValueError('stop_on_wrong_side_of_entry' if tpsl == 'sl' else 'take_profit_on_wrong_side_of_entry')
-        if any(abs(Decimal(value) - reference) > reference / 2 for value in (trigger, limit)):
+        if abs(Decimal(limit) - Decimal(trigger)) > Decimal(trigger) / 2 or any(
+                abs(Decimal(value) - reference) > reference / 2 for value in (trigger, limit)):
             raise ValueError('trigger_price_outside_band')
         fields[name] = {'asset': asset['asset'], 'asset_index': asset['asset_index'], 'is_buy': not is_buy,
                         'size': entry['size'], 'reduce_only': True, 'is_market': True,
