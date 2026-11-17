@@ -193,8 +193,14 @@ async def info(request):
         result = [{'t': start, 'T': start + 899999, 'c': state.get('candle_close', '100000')}]
     elif kind == 'userFills':
         result = state['fills']
+    elif kind == 'userAbstraction':
+        if state.get('account_mode_unavailable'):
+            return web.Response(status=503)
+        result = state.get('account_mode', 'disabled')
+    elif kind == 'spotClearinghouseState':
+        result = {'balances': state.get('spot_balances', [])}
     elif kind == 'clearinghouseState':
-        result = {'marginSummary': {'accountValue': '1000'}, 'assetPositions': []}
+        result = {'marginSummary': {'accountValue': state.get('perp_equity', '1000')}, 'assetPositions': []}
         symbol = state.get('position_asset', 'BTC')
         if state['position'] and (symbol.split(':')[0] if ':' in symbol else '') == dex:
             result['assetPositions'] = [{'position': {'coin': symbol, 'szi': str(state['position']), 'entryPx': '100000'}}]

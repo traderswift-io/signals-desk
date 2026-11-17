@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 import uuid
-from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, DecimalException, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -256,6 +256,38 @@ async def read_info(runtime, kind, timeout_seconds=10, **fields):
 
 async def account_state(runtime, symbol=''):
     return await read_info(runtime, 'clearinghouseState', user=runtime['config']['account_address'], **dex_fields(symbol))
+
+
+async def account_equity(runtime, symbol):
+    user = runtime['config']['account_address']
+    try:
+        mode = await read_info(runtime, 'userAbstraction', user=user)
+    except (aiohttp.ClientError, OSError, ValueError, TypeError):
+        raise ValueError('account_mode_unknown') from None
+    if mode not in ('unifiedAccount', 'portfolioMargin', 'disabled', 'default'):
+        raise ValueError('account_mode_unknown')
+    try:
+        account = await account_state(runtime, symbol)
+        perp_equity = Decimal(str(account['marginSummary']['accountValue']))
+        spot_usdc_equity = Decimal(0)
+        if mode in ('unifiedAccount', 'portfolioMargin'):
+            spot = await read_info(runtime, 'spotClearinghouseState', user=user)
+            if not isinstance(spot['balances'], list):
+                raise ValueError('invalid_account_equity')
+            balances = [balance for balance in spot['balances'] if balance['coin'] == 'USDC']
+            if len(balances) > 1:
+                raise ValueError('invalid_account_equity')
+            if balances:
+                spot_usdc_equity = Decimal(str(balances[0]['total']))
+        if any(not value.is_finite() or value < 0 for value in (perp_equity, spot_usdc_equity)):
+            raise ValueError('invalid_account_equity')
+        equity = perp_equity + spot_usdc_equity
+        if not equity.is_finite():
+            raise ValueError('invalid_account_equity')
+    except (aiohttp.ClientError, OSError, ValueError, TypeError, KeyError, DecimalException):
+        raise ValueError('invalid_account_equity') from None
+    return {'equity': equity, 'account_mode': mode, 'perp_equity': perp_equity,
+            'spot_usdc_equity': spot_usdc_equity, 'account': account}
 
 
 def price_text(price, size_decimals, is_buy):

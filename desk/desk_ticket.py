@@ -46,7 +46,7 @@ async def ticket_result(arguments):
         signal = parse_signal(envelope, await refresh_meta(runtime), now_ms())
         if signal.get('kind') == 'cancel':
             return {'refused': 'not_an_entry_signal'}
-        sized, fields, intent, account = await entry_preview(runtime, signal)
+        sized, fields, intent, account, equity = await entry_preview(runtime, signal)
         if arguments.action == 'size':
             return sized
         with journal_guard(config) as refusal:

@@ -4,6 +4,8 @@ Based on [HyperGrok Trading Desk](https://github.com/galleonlabs/hypergrok-tradi
 
 Chain verification runs once at the Desk Lead's intake through `desk_anchor_verify`, which journals a pass bound to the envelope's payload hash; with `resident: false`, the routine Executor `run` and the `desk_ticket` gate and size previews refuse `anchor_not_verified` without a matching record; the other seats act on the envelope the Lead routed; the resident signal consumer does not run the verifier.
 
+The Signals service anchors nothing on chain yet (`receipt: null`), so today the verifier refuses every signal on this branch until anchors are published.
+
 Signals Desk is the TraderSwift demo desk for sizing, checking and executing published trade signals through Signer under a delegate policy. It uses a locally generated delegate key, never a venue signing key. The `main` branch mirrors upstream unchanged; `signer` carries our changes; this branch, `traderswift`, adds chain verification at the Desk Lead's routine intake and a matching journal requirement for routine execution and previews.
 
 The Signals service is private. Obtain access and a subscriber token from the signal publisher; this repository does not provide a public signal feed.

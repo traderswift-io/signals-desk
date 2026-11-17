@@ -118,7 +118,7 @@ async def submit(runtime, envelope):
         set_state(config, ticket, 'claimed')
         runtime['tickets'][signal['signal_id']] = ticket
         try:
-            sized, fields, gate_intent, account = await entry_preview(runtime, signal)
+            sized, fields, gate_intent, account, equity = await entry_preview(runtime, signal)
             with journal_guard(config) as refusal:
                 budget = signed_today(config, signal['asset'])
                 reason = evaluate_intent(gate_intent, config['policy'], runtime['asset_indices'], budget,
@@ -126,7 +126,8 @@ async def submit(runtime, envelope):
             if refusal:
                 return refusal
             append_record(config['record_path'], 'gate', key=key, reason=reason, sizing=sized,
-                          entry_price=fields.get('entry', fields)['limit_px'], intent=gate_intent)
+                          entry_price=fields.get('entry', fields)['limit_px'], intent=gate_intent,
+                          account_mode=equity['account_mode'], perp_equity=str(equity['perp_equity']), spot_usdc_equity=str(equity['spot_usdc_equity']))
             if reason:
                 return await refuse(runtime, ticket, reason)
             if any(other is not ticket and other['state'] in ('claimed', 'sent', 'filled') for other in runtime['tickets'].values()):
