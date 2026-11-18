@@ -6,6 +6,7 @@ from pathlib import Path
 import aiohttp
 
 from .desk_bracket import signal_bracket
+from .desk_trigger_distance import check_trigger_distance
 from .desk_wake import validate_symbols
 from .desk_record import now_ms
 from .desk_position_sizer import asset_metadata, size_position
@@ -21,8 +22,16 @@ def load_config(path, require_public_key=False):
             raise ValueError(f'missing_config_{field}')
     if config['account_address'] != config['vault_address']:
         raise ValueError('account_must_match_vault')
-    if not 0 < Decimal(config['exit_band']) < 1:
+    try:
+        exit_band = Decimal(str(config['exit_band']))
+    except InvalidOperation:
+        raise ValueError('invalid_exit_band') from None
+    if not exit_band.is_finite() or not 0 < exit_band <= Decimal('0.008'):
         raise ValueError('invalid_exit_band')
+    config.setdefault('max_trigger_distance_bps', 1000)
+    maximum = config['max_trigger_distance_bps']
+    if type(maximum) is not int or not 0 < maximum <= 1000:
+        raise ValueError('invalid_max_trigger_distance_bps')
     config.setdefault('resident', True)
     config.setdefault('stop_mode', 'software')
     config.setdefault('bracket_slippage_bps', '50')
@@ -83,15 +92,17 @@ def order_fields(signal, size, price, reduce_only=False):
 async def entry_preview(runtime, signal):
     config = runtime['config']
     metadata, context, local_index = await market_context(runtime, signal['asset'])
+    check_trigger_distance(config, signal, context['markPx'],
+                           [('sl', signal['levels']['stop']), ('tp', signal['levels'].get('target'))])
     account = await account_state(runtime, signal['asset'])
     if not config.get('resident', True):
-        signal_bracket(config, signal, '1', int(metadata['universe'][local_index]['szDecimals']))
+        signal_bracket(config, signal, '1', int(metadata['universe'][local_index]['szDecimals']), context['markPx'])
     sized = size_position(signal, account['marginSummary']['accountValue'], context['markPx'],
                           asset_metadata(metadata, local_index), config['risk_fraction'], config['leverage_cap'])
     entry = price_text(Decimal(signal['levels']['entry']), int(metadata['universe'][local_index]['szDecimals']), signal['side'] == 'long')
     fields = order_fields(signal, sized['size'], entry)
     if not config.get('resident', True):
-        fields = signal_bracket(config, signal, sized['size'], int(metadata['universe'][local_index]['szDecimals']))
+        fields = signal_bracket(config, signal, sized['size'], int(metadata['universe'][local_index]['szDecimals']), context['markPx'])
     intent = {**fields, 'expires_at': now_ms() // 1000 + 120,
               'venue': 'hyperliquid', 'vault_address': config['vault_address'], 'policy_epoch': config['policy']['epoch']}
     return sized, fields, intent, account

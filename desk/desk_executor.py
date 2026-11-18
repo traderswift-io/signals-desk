@@ -44,8 +44,8 @@ async def reconcile(runtime, ticket):
     return ticket['position']
 
 
-async def refuse(runtime, ticket, reason):
-    set_state(runtime['config'], ticket, 'refused', reason=reason)
+async def refuse(runtime, ticket, reason, **details):
+    set_state(runtime['config'], ticket, 'refused', reason=reason, **details)
     review(runtime['config'], ticket)
     await disarm(ticket)
     return {'refused': reason}
@@ -103,12 +103,14 @@ async def submit(runtime, envelope):
         if signal.get('kind') == 'cancel':
             return await cancel_locked(runtime, signal['signal_id'], signal['publisher'])
         if not config.get('resident', True):
+            details = {}
             try:
                 reason = await entry_candle_guard(runtime, signal)
             except (ValueError, KeyError, TypeError, aiohttp.ClientError, TimeoutError) as error:
                 reason = str(error)
+                details = getattr(error, 'details', {})
             if reason:
-                append_record(config['record_path'], 'refusal', signal_id=signal['signal_id'], reason=reason)
+                append_record(config['record_path'], 'refusal', signal_id=signal['signal_id'], reason=reason, **details)
                 return {'refused': reason}
         key = ticket_key(config, signal)
         if already_acted(config['record_path'], key):
@@ -167,7 +169,7 @@ async def submit(runtime, envelope):
                 append_record(config['record_path'], 'recovery_required', key=key, reason=str(error))
                 ticket['uncertain'] = True
                 return {'refused': 'recovery_required'}
-            return await refuse(runtime, ticket, str(error))
+            return await refuse(runtime, ticket, str(error), **getattr(error, 'details', {}))
 
 
 async def cancel_locked(runtime, signal_id, publisher=None):

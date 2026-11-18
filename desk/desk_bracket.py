@@ -1,10 +1,13 @@
 from decimal import Decimal, InvalidOperation
 
 from .desk_wake import BAR_MS, active_asset
-from .signer_delegate_client import bracket_fields, now_ms, price_text, read_info, resolve_symbol
+from .desk_trigger_distance import check_trigger_distance
+from .signer_delegate_client import bracket_fields, market_context, now_ms, price_text, read_info
 
 
-def signal_bracket(config, signal, size, size_decimals):
+def signal_bracket(config, signal, size, size_decimals, mark_price):
+    check_trigger_distance(config, signal, mark_price,
+                           [('sl', signal['levels']['stop']), ('tp', signal['levels'].get('target'))])
     try:
         band = Decimal(str(config.get('bracket_slippage_bps', '50'))) / 10000
         if not band.is_finite() or not 0 <= band <= Decimal('0.5'):
@@ -21,6 +24,7 @@ def signal_bracket(config, signal, size, size_decimals):
                 trigger = price_text(Decimal(trigger), size_decimals, not buy)
                 limit = price_text(Decimal(trigger) * (1 - band if buy else 1 + band), size_decimals, not buy)
                 prices.extend((trigger, limit))
+        check_trigger_distance(config, signal, mark_price, [('sl', prices[0]), ('tp', prices[2])])
         return bracket_fields(signal, size, entry, buy, *prices)
     except InvalidOperation:
         raise ValueError('trigger_price_outside_band') from None
@@ -69,8 +73,8 @@ async def entry_candle_guard(runtime, signal):
         return 'outside_active_hours'
     if signal.get('published_at', 0) > close:
         return 'awaiting_candle_close'
-    metadata = resolve_symbol(signal['asset'], runtime['meta'])
-    signal_bracket(runtime['config'], signal, '1', int(metadata['szDecimals']))
+    metadata, context, local_index = await market_context(runtime, signal['asset'])
+    signal_bracket(runtime['config'], signal, '1', int(metadata['universe'][local_index]['szDecimals']), context['markPx'])
     if invalidated(signal, await closed_price(runtime, signal, close)):
         return 'signal_invalidated'
     return wake_close_refusal(close)

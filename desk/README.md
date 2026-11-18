@@ -67,6 +67,7 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 | `resident` | Boolean, default `true`. Routine-driven bot workspaces must set `false`. |
 | `stop_mode` | `software` (default) or `trigger`. Both labels use brackets when `resident: false`; resident execution retains software exits. |
 | `bracket_slippage_bps` | Decimal basis points, default `50`. Trigger limits extend below triggers for sells and above for buys. Negative, nonfinite or over-5000 values refuse `trigger_price_outside_band`; every trigger and bound must also stay within 50% of entry. |
+| `max_trigger_distance_bps` | Integer, default `1000`, strictly positive and at most `1000`; invalid values refuse at load with `invalid_max_trigger_distance_bps`. Stop and optional target distances are checked against current `markPx` before signing. |
 | `symbols` | Canonical asset to `active_utc` intervals and `days` map. Example: `{"BTC": {"active_utc": [["00:00", "24:00"]], "days": "mon-sun"}}`. An absent asset is published, not traded by routines. |
 | `info_url`, `websocket_url` | Public venue Info and websocket endpoints. |
 | `binance_ticker_url` | Public price-ticker endpoint. |
@@ -83,7 +84,7 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 | `control_socket` | Owner-only local Unix control socket used by the cancel CLI. |
 | `risk_fraction` | Fraction of equity risked across entry-to-stop distance. |
 | `leverage_cap` | Maximum entry notional divided by equity. |
-| `exit_band` | Fractional IOC price allowance beyond a stop/target or current mark. |
+| `exit_band` | Fractional IOC price allowance beyond a stop/target or current mark, `0 < exit_band ≤ 0.008`. Wider or invalid values refuse at load with `invalid_exit_band`. This pin keeps closes inside the 100 bps Signer band. |
 | `request_timeout_seconds` | Shared request timeout override: coordinator default 120 seconds; delivery default 10 seconds. Delivery values must be finite, strictly positive and at most 30 seconds; all other values fall back to 10 seconds. |
 | `policy.epoch` | Expected live signer policy epoch. |
 | `policy.venues`, `policy.vault_address` | Allowed venues and required vault. |
@@ -98,6 +99,8 @@ Copy `config.example.json` to the ignored `config.json` and replace every placeh
 Publication envelopes contain `payload` and adjacent `receipt`; version is 1. The reader accepts an explicit outer `version: 1` and the agreed v1 envelope without an explicit version. Signal payloads need identity, publisher, venue symbol (or symbol fallback), side, invalidation, confidence, numeric entry and stop, and a future Unix-millisecond `reply_by`. A cancel payload needs kind, signal id and publisher. Stream metadata must agree with the embedded identity and kind. Receipt anchoring is outside this implementation. Symbols match case-insensitively across the main and configured builder universes. No match refuses `symbol_unmapped`; multiple matches refuse `symbol_ambiguous`. Tickets store the exact meta name in `venue_symbol` and `asset`; order and cancel intents use that name and its venue asset index. Builder indices use the DEX slot returned by `perpDexs`, including empty slots. Policy cap asset names must use canonical meta spelling.
 
 ## Execution and records
+
+The trigger distance check mirrors the Signer desk policy's `max_trigger_distance_bps`, so the desk refuses locally rather than collecting signer refusals. Before signing an entry or bracket, each stop and optional target must satisfy `abs(trigger - markPx) / markPx * 10000 <= max_trigger_distance_bps`. Brackets check both original and rounded trigger prices. A violation refuses the entire signal with `trigger_distance_exceeds_max` and records the asset, leg (`sl` or `tp`) and `distance_bps`; nothing is signed or sent. Resident execution on this branch uses software exits and has no resident backstop replacement path.
 
 Routine-driven bots set `resident: false`. An eligible signal submits exactly one `bracket`: a GTC entry at the signal entry, a resting stop at `levels.stop`, and a take-profit at `levels.target` when present. Venue precision rounding uses the existing price helper. Legs have the same size as the existing sizer’s entry, opposite direction, `reduce_only: true`, and `is_market: true`; their limit prices bound slippage. A signer refusal records `bracket_refused` with the unchanged reason and sends no plain entry. Reviewer records say `stop: bracket`.
 
@@ -136,6 +139,7 @@ After an ambiguous send, open orders, fills and account positions are reconciled
 | `desk_risk_gate.py` | Policy mirror, daily budget and signal expiry. |
 | `desk_executor.py` | Serialized lifecycle, recovery, cancellation and command entry point. |
 | `desk_bracket.py` | Signal bracket construction and closed-candle guards. |
+| `desk_trigger_distance.py` | Decimal trigger distance checks against current mark, with refusal details. |
 | `desk_routine.py` | One-shot bracket recovery, outcomes and pending-entry cancellation. |
 | `desk_wake.py` | Read-only active-hours and work check, without a timer. |
 | `desk_scenarios_bracket.py` | Fifteen socket-free bracket scenarios using the existing fake services. |

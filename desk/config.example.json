@@ -7,6 +7,7 @@
   "builder_dexs": ["xyz"],
   "resident": true,
   "bracket_slippage_bps": "50",
+  "max_trigger_distance_bps": 1000,
   "symbols": {"BTC": {"active_utc": [["00:00", "24:00"]], "days": "mon-sun"}},
   "stop_mode": "software",
   "info_url": "<venue-info-url>",
