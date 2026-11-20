@@ -1,5 +1,11 @@
 # Set up the Signals Desk demo
 
+Signals Desk is five Grok bots that size, check and execute published trade signals through Signer, without ever holding a venue key.
+
+**Just want to see it? Start here:** [how a signal moves through the five bots](skills/README.md), then [the desk modules](desk/README.md). Both read on GitHub, with nothing to install.
+
+**Before you set it up:** you need a private subscriber token from the signal publisher and a door access token from the Signer service operator. Neither is in this repository. Without them you can still read everything and run the fake-service checks (`make check` in `desk/`).
+
 This guide documents the **TraderSwift demo desk** in Grok: five bots in a private Trading Floor, five role skills, two service credentials and one routine scheduled in UTC. The Signals service is private; obtain a subscriber token from the signal publisher. Setup generates the Executor's delegate key and places no orders.
 
 This guide is for the `signer` branch; `main` mirrors upstream unchanged. The `traderswift` branch is the same desk plus chain verification of each signal; its SETUP.md covers the extra config. Use a reviewed checkout of this fork and record its commit. Routine-driven entries now use brackets. Brackets need a Signer release that signs the bracket kind; until then the signer refuses the kind and the desk records `bracket_refused`. This change does not configure a live run.

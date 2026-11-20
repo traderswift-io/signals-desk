@@ -2,7 +2,7 @@
 
 Based on [HyperGrok Trading Desk](https://github.com/galleonlabs/hypergrok-trading-desk) by [Andrew Wilkinson](https://andrewwilkinson.io) and [Galleon Labs](https://github.com/galleonlabs). Used under the MIT license. This is a separate project with its own name because it changes the approval model; it is not HyperGrok and is not affiliated with or endorsed by its authors. See [ATTRIBUTION.md](ATTRIBUTION.md).
 
-Signals Desk is the TraderSwift demo desk for sizing, checking and executing published trade signals through Signer under a delegate policy. It uses a locally generated delegate key, never a venue signing key. The `main` branch mirrors upstream unchanged; this branch, `signer`, carries our changes. The `traderswift` branch adds chain verification: before intake hands a signal on, it checks the publisher's charter, provider record and the signal's anchor on `https://chain.traderswift.io`.
+Signals Desk is the TraderSwift demo desk for sizing, checking and executing published trade signals through Signer under a delegate policy. It uses a locally generated delegate key, never a venue signing key. The `main` branch mirrors upstream unchanged; this branch, `signer`, carries our changes. The `traderswift` branch adds chain verification: before intake hands a signal on, it checks the publisher's charter, provider record and the signal's anchor on the TraderSwift chain ([traderswift-chain](https://github.com/traderswift-io/traderswift-chain)).
 
 The Signals service is private. Obtain access and a subscriber token from the signal publisher; this repository does not provide a public signal feed.
 
